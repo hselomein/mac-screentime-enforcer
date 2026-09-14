@@ -56,6 +56,13 @@ from SystemConfiguration import (  # type: ignore
     SCDynamicStoreCopyValue,
 )
 
+# Same paho-mqtt client the original per-user agent uses (screentime_enforcer.py),
+# reused nearly unchanged per the handoff. NOTE: this needs to be run with the
+# production venv's interpreter (/Library/Application Support/ha-screen-agent/venv/bin/python3),
+# not plain `sudo python3` — paho-mqtt is installed under the invoking user's
+# site-packages, which root (via sudo) can't see.
+import paho.mqtt.client as mqtt  # type: ignore
+
 # Screen-lock detection: see ScreenLockTracker below for why this reads
 # ioreg's IOConsoleUsers rather than a Quartz/notification-based approach.
 
@@ -201,6 +208,7 @@ class ManagedUserRegistry:
     def __init__(self, config_path: str):
         self.config_path = config_path
         self._by_mac_user: dict[str, dict] = {}
+        self._by_child: dict[str, dict] = {}
         self.reload()
 
     def reload(self) -> None:
@@ -212,6 +220,11 @@ class ManagedUserRegistry:
             for entry in entries
             if "mac_user_account" in entry and "child_name" in entry
         }
+        self._by_child = {
+            entry["child_name"]: entry
+            for entry in entries
+            if "child_name" in entry
+        }
         logger.info(
             "Loaded %d managed user mapping(s): %s",
             len(self._by_mac_user),
@@ -222,19 +235,218 @@ class ManagedUserRegistry:
         entry = self._by_mac_user.get(mac_user)
         return entry["child_name"] if entry else None
 
+    def topic_prefix_for(self, child_name: str) -> Optional[str]:
+        entry = self._by_child.get(child_name)
+        return entry.get("topic_prefix") if entry else None
+
+    def mac_user_for(self, child_name: str) -> Optional[str]:
+        entry = self._by_child.get(child_name)
+        return entry.get("mac_user_account") if entry else None
+
+    def all_children(self) -> list[str]:
+        return list(self._by_child.keys())
+
+
+def _sanitize_device_id(value: str) -> str:
+    """
+    Matches screentime_enforcer.py's _sanitize_device_id exactly (same
+    file, same transform) — critical, not cosmetic: topics built from an
+    unsanitized device_id land on entirely different MQTT topics than the
+    ones HA's existing entities are actually subscribed to. Confirmed on
+    real hardware: config.json's raw device_id is "MacbookProM1" (mixed
+    case), but every existing retained topic on the broker uses the
+    lowercased "macbookprom1" — publishing without this sanitization step
+    silently wrote to a parallel set of topics nothing was listening to.
+    """
+    sanitized = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in value.lower())
+    return sanitized or "mac"
+
+
+class DaemonMqttConfig:
+    """
+    The top-level (device-wide) MQTT fields from config.json — separate
+    from ManagedUserRegistry, which only cares about the per-kid
+    managed_users entries. Same config file, two narrow readers, rather
+    than one class doing both jobs.
+    """
+
+    def __init__(
+        self,
+        device_id: str,
+        mqtt_host: str,
+        mqtt_port: int,
+        mqtt_username: Optional[str],
+        mqtt_password: Optional[str],
+        mqtt_tls: bool,
+        sample_interval_seconds: float,
+    ) -> None:
+        self.device_id = _sanitize_device_id(device_id)
+        self.mqtt_host = mqtt_host
+        self.mqtt_port = mqtt_port
+        self.mqtt_username = mqtt_username
+        self.mqtt_password = mqtt_password
+        self.mqtt_tls = mqtt_tls
+        self.sample_interval_seconds = sample_interval_seconds
+
+    @classmethod
+    def load(cls, config_path: str) -> "DaemonMqttConfig":
+        with open(config_path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return cls(
+            device_id=data["device_id"],
+            mqtt_host=data["mqtt_host"],
+            mqtt_port=int(data.get("mqtt_port", 1883)),
+            mqtt_username=data.get("mqtt_username"),
+            mqtt_password=data.get("mqtt_password"),
+            mqtt_tls=bool(data.get("mqtt_tls", False)),
+            sample_interval_seconds=float(data.get("sample_interval_seconds", 15)),
+        )
+
+
+# Topic scheme matches screentime_enforcer.py's AgentConfig properties
+# exactly (see minutes_topic/active_topic/availability_topic there), so
+# these land on the SAME HA entities the existing per-kid agent already
+# published discovery config for — no new discovery messages needed here.
+def minutes_topic(topic_prefix: str, device_id: str) -> str:
+    return f"{topic_prefix}/mac/{device_id}/minutes_today"
+
+
+def active_topic(topic_prefix: str, device_id: str) -> str:
+    return f"{topic_prefix}/mac/{device_id}/active"
+
+
+def availability_topic(topic_prefix: str, device_id: str) -> str:
+    return f"{topic_prefix}/mac/{device_id}/availability"
+
+
+# New topic — not part of screentime_enforcer.py's scheme, since the
+# per-user agent never needed it (it only ever ran while ITS OWN kid was
+# active; there was no "check another kid's state" concept). This one
+# reports one of "active" | "locked" | "backgrounded" | "offline" for
+# EVERY managed kid on this device, not just whoever's currently active —
+# richer visibility than the boolean `active` topic alone.
+def session_state_topic(topic_prefix: str, device_id: str) -> str:
+    return f"{topic_prefix}/mac/{device_id}/session_state"
+
+
+ROOT_DAEMON_VERSION = "0.1.0-skeleton"
+
+
+def _discovery_device(child: str, device_id: str) -> dict:
+    """Same identifiers screentime_enforcer.py's _discovery_device uses,
+    so this groups under the SAME existing device card in HA rather than
+    creating a duplicate."""
+    return {
+        "identifiers": [f"{child}_{device_id}_mac"],
+        "name": f"{child} mac",
+        "manufacturer": "Screen Time Agent",
+        "model": "macOS agent",
+        "sw_version": ROOT_DAEMON_VERSION,
+    }
+
+
+def build_mqtt_client(mqtt_config: DaemonMqttConfig, registry: ManagedUserRegistry) -> mqtt.Client:
+    """
+    ONE client for the whole machine (requirement #4), not one per kid —
+    the actual architectural point of this rewrite. client_id is keyed by
+    device only.
+    """
+    client_id = f"ha-root-daemon-{mqtt_config.device_id}"
+    client = mqtt.Client(
+        callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        client_id=client_id,
+        protocol=mqtt.MQTTv311,
+        clean_session=True,
+    )
+    if mqtt_config.mqtt_username:
+        client.username_pw_set(
+            mqtt_config.mqtt_username, password=mqtt_config.mqtt_password or None
+        )
+    if mqtt_config.mqtt_tls:
+        client.tls_set()
+
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        rc = int(getattr(reason_code, "value", reason_code))
+        if rc != 0:
+            logger.error("MQTT connection failed (rc=%s).", rc)
+            return
+        logger.info("Connected to MQTT broker.")
+        # One daemon covers every managed kid, not just whoever's active
+        # right now — so on connect, mark ALL of them online, not just
+        # one. (No per-connection LWT covering all of them yet: paho only
+        # supports a single last-will topic per client, so a hard crash
+        # won't flip these back to offline automatically. Best-effort for
+        # now; publishing "offline" happens explicitly on clean shutdown
+        # below. Revisit if crash-detection turns out to matter here.)
+        for child in registry.all_children():
+            prefix = registry.topic_prefix_for(child)
+            if not prefix:
+                continue
+            client.publish(
+                availability_topic(prefix, mqtt_config.device_id),
+                payload="online",
+                retain=True,
+                qos=1,
+            )
+            # session_state discovery — new sensor, not part of the
+            # original agent's scheme (see session_state_topic above for
+            # why). Re-publishing discovery on every connect is cheap and
+            # idempotent (retained, same payload), so no "already
+            # published" guard needed like the original agent's
+            # _discovery_published flag.
+            base_id = f"{child}_{mqtt_config.device_id}_mac"
+            discovery_topic = f"homeassistant/sensor/{base_id}_session_state/config"
+            discovery_payload = {
+                "name": f"{child} Mac Session State",
+                "unique_id": f"{base_id}_session_state",
+                "state_topic": session_state_topic(prefix, mqtt_config.device_id),
+                "icon": "mdi:account-clock",
+                "device": _discovery_device(child, mqtt_config.device_id),
+            }
+            client.publish(
+                discovery_topic, json.dumps(discovery_payload), retain=True, qos=1
+            )
+
+    def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
+        rc = int(getattr(reason_code, "value", reason_code))
+        if rc != 0:
+            logger.warning("Unexpected MQTT disconnect (rc=%s).", rc)
+
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    return client
+
 
 def main() -> None:
     # TODO: point at the real config path once this is wired into the
     # actual daemon; kept as a placeholder constant for now during
     # standalone testing.
-    registry = ManagedUserRegistry(
-        "/Library/Application Support/ha-screen-agent/config.json"
+    CONFIG_PATH = "/Library/Application Support/ha-screen-agent/config.json"
+    registry = ManagedUserRegistry(CONFIG_PATH)
+    mqtt_config = DaemonMqttConfig.load(CONFIG_PATH)
+
+    mqtt_client = build_mqtt_client(mqtt_config, registry)
+    logger.info(
+        "Connecting to MQTT %s:%s as device '%s'.",
+        mqtt_config.mqtt_host,
+        mqtt_config.mqtt_port,
+        mqtt_config.device_id,
     )
+    mqtt_client.connect_async(mqtt_config.mqtt_host, mqtt_config.mqtt_port, keepalive=60)
+    mqtt_client.loop_start()  # background thread; publish() calls below are non-blocking
 
     last_seen_user: Optional[str] = object()  # sentinel, never equals a real value
     last_seen_sessions: dict[str, int] = {}
     last_seen_locked: Optional[bool] = None  # sentinel, always logs the first reading
     active_child: Optional[str] = None  # the kid currently accruing time, if any
+
+    # In-memory only — NOT persisted across restarts, and NOT reset at
+    # local midnight. Good enough to prove MQTT wiring end-to-end in HA;
+    # matching screentime_enforcer.py's UsageState (file-backed, proper
+    # daily reset) is separate follow-up work, not in scope for this pass.
+    accumulated_seconds: dict[str, float] = {}
+    last_published_minutes: dict[str, int] = {}
+    last_published_state: dict[str, str] = {}
 
     logger.info("Starting console-user + lock-state detection loop (Ctrl+C to stop).")
     try:
@@ -242,6 +454,28 @@ def main() -> None:
             current_user = get_console_user()
             locked = is_screen_locked()
             all_sessions = get_all_logged_in_sessions()
+
+            # Per-kid session_state, for EVERY managed kid, not just
+            # whoever's currently active — richer than the boolean
+            # `active` topic. Published only on change.
+            for child in registry.all_children():
+                mac_user = registry.mac_user_for(child)
+                if mac_user == current_user:
+                    state = "locked" if locked else "active"
+                elif mac_user in all_sessions:
+                    state = "backgrounded"
+                else:
+                    state = "offline"
+                if state != last_published_state.get(child):
+                    prefix = registry.topic_prefix_for(child)
+                    if prefix:
+                        mqtt_client.publish(
+                            session_state_topic(prefix, mqtt_config.device_id),
+                            payload=state,
+                            retain=True,
+                            qos=1,
+                        )
+                    last_published_state[child] = state
 
             # General lock-state visibility for ANY console user, not just
             # managed kids — the PAUSE/RESUME messages below only fire for
@@ -295,10 +529,16 @@ def main() -> None:
                         current_user,
                         locked,
                     )
-                    # TODO: hook point — stop the per-minute countdown for
-                    # active_child once minute-tracking is ported over, AND
-                    # (requirement #9) publish retained MQTT state clearing
-                    # this device's active_child, e.g.
+                    prefix = registry.topic_prefix_for(active_child)
+                    if prefix:
+                        mqtt_client.publish(
+                            active_topic(prefix, mqtt_config.device_id),
+                            payload="0",
+                            retain=False,
+                            qos=0,
+                        )
+                    # TODO: requirement #9 — also publish retained MQTT
+                    # state clearing this device's active_child, e.g.
                     #   screen/<this_device>/active_child = "" (retained)
                     # so HA's per-kid "current device" sensor reflects them
                     # no longer being active here.
@@ -308,19 +548,42 @@ def main() -> None:
                         should_be_active,
                         current_user,
                     )
-                    # TODO: hook point — start/resume the per-minute
-                    # countdown for should_be_active, and check their
-                    # retained 'allowed' state immediately (lock right
-                    # away if they've already exhausted their budget —
-                    # this is what actually closes the fast-user-switch
-                    # bypass, without needing to reach into any other
-                    # session to lock it). ALSO (requirement #9): publish
-                    # retained MQTT state for this device's active_child,
-                    # e.g. screen/<this_device>/active_child = should_be_active
-                    # plus a timestamp, so HA can surface cross-device
-                    # sibling-borrowing in its logbook/history even though
-                    # we can't prevent it outright.
+                    prefix = registry.topic_prefix_for(should_be_active)
+                    if prefix:
+                        mqtt_client.publish(
+                            active_topic(prefix, mqtt_config.device_id),
+                            payload="1",
+                            retain=False,
+                            qos=0,
+                        )
+                    # TODO: hook point — check should_be_active's retained
+                    # 'allowed' state immediately (lock right away if
+                    # they've already exhausted their budget — this is
+                    # what actually closes the fast-user-switch bypass,
+                    # without needing to reach into any other session to
+                    # lock it). Also requirement #9 (see PAUSE branch
+                    # above) — publish this device's new active_child.
                 active_child = should_be_active
+
+            # Minute accumulation + publish — in-memory only, see main()'s
+            # comment above accumulated_seconds for what's NOT yet ported
+            # (persistence, daily reset). Publishes only when the whole
+            # minutes value actually changes, not every poll tick.
+            if active_child is not None:
+                accumulated_seconds[active_child] = (
+                    accumulated_seconds.get(active_child, 0.0) + POLL_INTERVAL_SECONDS
+                )
+                minutes = int(accumulated_seconds[active_child] // 60)
+                if minutes != last_published_minutes.get(active_child):
+                    prefix = registry.topic_prefix_for(active_child)
+                    if prefix:
+                        mqtt_client.publish(
+                            minutes_topic(prefix, mqtt_config.device_id),
+                            payload=str(minutes),
+                            retain=True,
+                            qos=1,
+                        )
+                    last_published_minutes[active_child] = minutes
 
             if all_sessions != last_seen_sessions:
                 for user, uid in all_sessions.items():
@@ -341,6 +604,28 @@ def main() -> None:
             time.sleep(POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         logger.info("Stopping (Ctrl+C).")
+    finally:
+        if active_child is not None:
+            prefix = registry.topic_prefix_for(active_child)
+            if prefix:
+                mqtt_client.publish(
+                    active_topic(prefix, mqtt_config.device_id),
+                    payload="0",
+                    retain=False,
+                    qos=0,
+                )
+        for child in registry.all_children():
+            prefix = registry.topic_prefix_for(child)
+            if prefix:
+                mqtt_client.publish(
+                    availability_topic(prefix, mqtt_config.device_id),
+                    payload="offline",
+                    retain=True,
+                    qos=1,
+                )
+        time.sleep(0.5)  # give the background loop a moment to flush these
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
 
 
 if __name__ == "__main__":
