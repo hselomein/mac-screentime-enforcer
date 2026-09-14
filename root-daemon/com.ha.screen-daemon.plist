@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    LaunchDaemon (not LaunchAgent) — runs as root, system-wide, independent
+    of any single user's login session. Installed to
+    /Library/LaunchDaemons/com.ha.screen-daemon.plist (root:wheel owned,
+    permissions 644), then loaded with:
+
+        sudo launchctl bootstrap system /Library/LaunchDaemons/com.ha.screen-daemon.plist
+
+    Unlike the per-user LaunchAgent this replaces, there is no per-account
+    bootstrap step and nothing tied to logout/login — this starts at boot
+    and runs continuously, which is the whole point: it removes the
+    "reboot needed between account switches" problem at the source.
+    -->
+    <key>Label</key>
+    <string>com.ha.screen-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Library/Application Support/ha-screen-daemon/daemon.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>UserName</key>
+    <string>root</string>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/ha-screen-daemon.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/ha-screen-daemon.err.log</string>
+</dict>
+</plist>
