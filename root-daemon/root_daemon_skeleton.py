@@ -279,6 +279,8 @@ class DaemonMqttConfig:
         mqtt_password: Optional[str],
         mqtt_tls: bool,
         sample_interval_seconds: float,
+        fail_mode: str,
+        fail_grace_minutes: float,
     ) -> None:
         self.device_id = _sanitize_device_id(device_id)
         self.mqtt_host = mqtt_host
@@ -287,11 +289,25 @@ class DaemonMqttConfig:
         self.mqtt_password = mqtt_password
         self.mqtt_tls = mqtt_tls
         self.sample_interval_seconds = sample_interval_seconds
+        self.fail_mode = fail_mode
+        self.fail_grace_minutes = fail_grace_minutes
 
     @classmethod
     def load(cls, config_path: str) -> "DaemonMqttConfig":
         with open(config_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
+        # root_daemon_fail_mode is intentionally SEPARATE from the shared
+        # `fail_mode` key screentime_enforcer.py also reads from this same
+        # file — that loader raises ValueError on anything but "safe"/
+        # "open", so writing a third value ("grace") into the shared key
+        # would crash the still-running production per-user agent on its
+        # next restart. Defaults to mirroring `fail_mode` so behavior is
+        # unchanged unless explicitly opted into.
+        fail_mode = str(
+            data.get("root_daemon_fail_mode", data.get("fail_mode", "safe"))
+        ).lower()
+        if fail_mode not in {"safe", "open", "grace"}:
+            fail_mode = "safe"
         return cls(
             device_id=data["device_id"],
             mqtt_host=data["mqtt_host"],
@@ -300,6 +316,8 @@ class DaemonMqttConfig:
             mqtt_password=data.get("mqtt_password"),
             mqtt_tls=bool(data.get("mqtt_tls", False)),
             sample_interval_seconds=float(data.get("sample_interval_seconds", 15)),
+            fail_mode=fail_mode,
+            fail_grace_minutes=float(data.get("root_daemon_fail_grace_minutes", 120)),
         )
 
 
@@ -317,6 +335,65 @@ def active_topic(topic_prefix: str, device_id: str) -> str:
 
 def availability_topic(topic_prefix: str, device_id: str) -> str:
     return f"{topic_prefix}/mac/{device_id}/availability"
+
+
+def allow_topic(topic_prefix: str) -> str:
+    """Matches screentime_enforcer.py's allow_topic exactly: {prefix}/allowed
+    — NOT device-scoped, since it's a per-kid decision HA/the parent makes,
+    not something that varies by which Mac they're on."""
+    return f"{topic_prefix}/allowed"
+
+
+def _as_bool(payload: str) -> Optional[bool]:
+    """Matches screentime_enforcer.py's _as_bool exactly."""
+    normalized = payload.strip().lower()
+    if normalized in {"1", "true", "on", "yes"}:
+        return True
+    if normalized in {"0", "false", "off", "no"}:
+        return False
+    return None
+
+
+def resolve_allowed(
+    child: str,
+    allowed_state: dict,
+    fail_mode: str,
+    grace_started_at: dict,
+    fail_grace_minutes: float,
+) -> bool:
+    """
+    Extends screentime_enforcer.py's _current_allowed_state with a third
+    mode ("grace") this daemon adds on top — the original only has
+    "safe" (fail closed) and "open" (fail open indefinitely). Neither
+    covers the actual incident from the handoff: a kid with NO seeded
+    allowed value fails closed instantly, with no window for an operator
+    to notice before rapid-relogin shutdown escalation kicks in (this
+    happened for real, with aaron). "grace" is the fix: bounded temporary
+    allowance instead of instant-lock or infinite-allow.
+
+    - An explicit received value always wins, full stop.
+    - No value received (never seeded, or connection lost): "open" -> True
+      always; "safe" -> False always; "grace" -> True for
+      fail_grace_minutes, timed PER KID from the moment THEY specifically
+      hit this unknown state — not from whenever the underlying problem
+      began — so whoever logs in gets their own full window regardless of
+      how long the daemon's been up or MQTT's been down. Timer clears the
+      moment a real value arrives, so any later lapse starts a fresh
+      window rather than resuming an old countdown.
+    """
+    value = allowed_state.get(child)
+    if value is not None:
+        grace_started_at.pop(child, None)
+        return value
+
+    if fail_mode == "open":
+        return True
+    if fail_mode != "grace":
+        return False  # "safe", or anything unrecognized -> fail closed
+
+    started = grace_started_at.setdefault(child, time.monotonic())
+    elapsed_minutes = (time.monotonic() - started) / 60.0
+    return elapsed_minutes < fail_grace_minutes
 
 
 # New topic — not part of screentime_enforcer.py's scheme, since the
@@ -345,11 +422,22 @@ def _discovery_device(child: str, device_id: str) -> dict:
     }
 
 
-def build_mqtt_client(mqtt_config: DaemonMqttConfig, registry: ManagedUserRegistry) -> mqtt.Client:
+def build_mqtt_client(
+    mqtt_config: DaemonMqttConfig,
+    registry: ManagedUserRegistry,
+    allowed_state: dict,
+) -> mqtt.Client:
     """
     ONE client for the whole machine (requirement #4), not one per kid —
     the actual architectural point of this rewrite. client_id is keyed by
     device only.
+
+    allowed_state is a plain dict the caller owns — this function's
+    on_message callback writes into it (from paho's background thread,
+    via loop_start()) and main()'s poll loop reads from it (main thread).
+    No lock around that: matches the original agent's own informal
+    thread-safety model (self._allowed touched from both threads there
+    too), fine for simple last-write-wins on a single value per key.
     """
     client_id = f"ha-root-daemon-{mqtt_config.device_id}"
     client = mqtt.Client(
@@ -382,6 +470,10 @@ def build_mqtt_client(mqtt_config: DaemonMqttConfig, registry: ManagedUserRegist
             prefix = registry.topic_prefix_for(child)
             if not prefix:
                 continue
+            # Retained topic — subscribing delivers the current value
+            # immediately via on_message below, same as the original
+            # agent's own _on_connect subscribe.
+            client.subscribe(allow_topic(prefix))
             client.publish(
                 availability_topic(prefix, mqtt_config.device_id),
                 payload="online",
@@ -412,8 +504,32 @@ def build_mqtt_client(mqtt_config: DaemonMqttConfig, registry: ManagedUserRegist
         if rc != 0:
             logger.warning("Unexpected MQTT disconnect (rc=%s).", rc)
 
+    topic_to_child = {
+        allow_topic(prefix): child
+        for child in registry.all_children()
+        for prefix in [registry.topic_prefix_for(child)]
+        if prefix
+    }
+
+    def on_message(client, userdata, message):
+        child = topic_to_child.get(message.topic)
+        if child is None:
+            return
+        payload = (message.payload or b"").decode("utf-8", errors="ignore")
+        value = _as_bool(payload)
+        if value is None:
+            logger.warning(
+                "Received invalid allowed payload '%s' on %s", payload, message.topic
+            )
+            return
+        previous = allowed_state.get(child)
+        allowed_state[child] = value
+        if previous != value:
+            logger.info("Allowed state for '%s' updated to %s.", child, value)
+
     client.on_connect = on_connect
     client.on_disconnect = on_disconnect
+    client.on_message = on_message
     return client
 
 
@@ -425,7 +541,13 @@ def main() -> None:
     registry = ManagedUserRegistry(CONFIG_PATH)
     mqtt_config = DaemonMqttConfig.load(CONFIG_PATH)
 
-    mqtt_client = build_mqtt_client(mqtt_config, registry)
+    # Written by build_mqtt_client's on_message (background MQTT thread),
+    # read here in main()'s poll loop (main thread) — see build_mqtt_client's
+    # docstring for why no lock is used.
+    allowed_state: dict = {}
+    grace_started_at: dict = {}  # per-kid, only used when fail_mode="grace"
+
+    mqtt_client = build_mqtt_client(mqtt_config, registry, allowed_state)
     logger.info(
         "Connecting to MQTT %s:%s as device '%s'.",
         mqtt_config.mqtt_host,
@@ -556,13 +678,46 @@ def main() -> None:
                             retain=False,
                             qos=0,
                         )
-                    # TODO: hook point — check should_be_active's retained
-                    # 'allowed' state immediately (lock right away if
-                    # they've already exhausted their budget — this is
-                    # what actually closes the fast-user-switch bypass,
-                    # without needing to reach into any other session to
-                    # lock it). Also requirement #9 (see PAUSE branch
-                    # above) — publish this device's new active_child.
+                    # This is what actually closes the fast-user-switch
+                    # bypass: check the retained 'allowed' state the
+                    # instant a kid becomes console user, not just when a
+                    # new MQTT message happens to arrive. NOT YET
+                    # enforcing anything — lock/kill isn't ported from
+                    # screentime_enforcer.py yet, so this only logs what
+                    # WOULD happen, so the logic/timing can be validated
+                    # against real allowed-topic state on real hardware
+                    # before it's wired to anything destructive.
+                    is_allowed = resolve_allowed(
+                        should_be_active,
+                        allowed_state,
+                        mqtt_config.fail_mode,
+                        grace_started_at,
+                        mqtt_config.fail_grace_minutes,
+                    )
+                    if not is_allowed:
+                        logger.warning(
+                            "WOULD LOCK '%s' now (allowed=%s, fail_mode=%s) — "
+                            "enforcement not yet wired, this is a dry run.",
+                            should_be_active,
+                            allowed_state.get(should_be_active),
+                            mqtt_config.fail_mode,
+                        )
+                    elif (
+                        mqtt_config.fail_mode == "grace"
+                        and allowed_state.get(should_be_active) is None
+                    ):
+                        remaining = mqtt_config.fail_grace_minutes - (
+                            (time.monotonic() - grace_started_at[should_be_active]) / 60.0
+                        )
+                        logger.warning(
+                            "'%s' is in the fail-mode grace window (no allowed "
+                            "value received yet) — allowed for ~%.1f more "
+                            "minute(s) before failing closed.",
+                            should_be_active,
+                            max(remaining, 0.0),
+                        )
+                    # TODO: requirement #9 — publish this device's new
+                    # active_child (see PAUSE branch above).
                 active_child = should_be_active
 
             # Minute accumulation + publish — in-memory only, see main()'s
