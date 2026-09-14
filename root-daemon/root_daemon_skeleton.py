@@ -42,6 +42,7 @@ out first, since it's the actual new capability this rewrite depends on.
 from __future__ import annotations
 
 import json
+import plistlib
 import subprocess
 import time
 import logging
@@ -55,18 +56,30 @@ from SystemConfiguration import (  # type: ignore
     SCDynamicStoreCopyValue,
 )
 
-# CGSessionCopyCurrentDictionary reports the console display's lock state
-# (screensaver/password prompt up or not) — separate from WHO the console
-# user is. A kid can still be the console user while their screen is
-# locked (idle timeout, manual lock, walked away), and that shouldn't
-# count against their time budget either.
-import Quartz  # type: ignore
+# Screen-lock detection: see ScreenLockTracker below for why this reads
+# ioreg's IOConsoleUsers rather than a Quartz/notification-based approach.
+
+# Also logs to a file (world-readable, since this runs as root but is
+# meant to be inspected afterward as a regular user) so test output can be
+# reviewed after the fact without needing to watch the SSH session live.
+LOG_FILE_PATH = "/tmp/root_daemon_skeleton.log"
+
+_file_handler = logging.FileHandler(LOG_FILE_PATH)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(), _file_handler],
 )
 logger = logging.getLogger("root-screen-daemon")
+
+try:
+    import os
+
+    os.chmod(LOG_FILE_PATH, 0o644)
+except OSError:
+    pass
 
 CONSOLE_USER_KEY = "State:/Users/ConsoleUser"
 POLL_INTERVAL_SECONDS = 2.0
@@ -97,24 +110,45 @@ def get_console_user() -> Optional[str]:
 
 def is_screen_locked() -> bool:
     """
-    True if the console display is currently locked (screensaver +
-    password prompt up), regardless of who the console user is.
+    True if the ACTUAL PHYSICAL CONSOLE session is currently locked,
+    regardless of which session this process itself belongs to.
 
-    Lets the daemon pause time accounting when a kid is nominally still
-    "at console" but has actually stepped away and the screen has locked
-    on its own (idle timeout) or been locked manually — as distinct from
-    having been fast-user-switched away from entirely, which
-    get_console_user() already covers.
+    Two prior approaches were tried and both failed on real hardware,
+    consistent with the same root cause: this daemon is meant to run
+    outside any particular user's GUI session (root, no session of its
+    own — confirmed here via SSH, which is architecturally the same
+    situation a real LaunchDaemon is in), and macOS's session-scoped IPC
+    mechanisms don't cross that boundary:
 
-    CGSSessionScreenIsLocked is only present in the session dict while the
-    screen is locked; absent means unlocked. No session dict at all
-    (get_console_user() returning None, e.g. at the login window) is
-    treated as locked too, since nobody's actively using the machine then.
+    1. CGSessionCopyCurrentDictionary (Quartz) only reflected lock state
+       for whichever session the calling process's own identity happened
+       to be tied to (our own SSH login) — never fired for other
+       accounts' sessions.
+    2. NSDistributedNotificationCenter, listening for
+       com.apple.screenIsLocked/screenIsUnlocked: registered with no
+       error, but never received anything posted from a *different*
+       audit session than our own — distributed notifications appear not
+       to cross audit-session boundaries by default, same class of
+       problem as #1, different mechanism.
+
+    This third approach reads IOConsoleUsers from the IOKit registry via
+    `ioreg` instead — a kernel registry, not session-scoped IPC, so it
+    isn't subject to either failure mode. Confirmed manually on real
+    hardware: readable as a plain unprivileged, non-GUI process with no
+    special session context, correctly describing the actual console
+    session. Simple poll, not a callback — no run loop needed.
     """
-    session_info = Quartz.CGSessionCopyCurrentDictionary()
-    if session_info is None:
+    try:
+        output = subprocess.check_output(["ioreg", "-n", "Root", "-d1", "-a"])
+        data = plistlib.loads(output)
+    except (subprocess.CalledProcessError, ValueError):
+        logger.exception("Failed to read/parse ioreg IOConsoleUsers.")
         return True
-    return bool(session_info.get("CGSSessionScreenIsLocked", False))
+
+    for user in data.get("IOConsoleUsers", []):
+        if user.get("kCGSSessionOnConsoleKey"):
+            return bool(user.get("CGSSessionScreenIsLocked", False))
+    return True  # no console session at all (e.g. login window) -> locked
 
 
 def get_all_logged_in_sessions() -> dict[str, int]:
@@ -199,6 +233,7 @@ def main() -> None:
 
     last_seen_user: Optional[str] = object()  # sentinel, never equals a real value
     last_seen_sessions: dict[str, int] = {}
+    last_seen_locked: Optional[bool] = None  # sentinel, always logs the first reading
     active_child: Optional[str] = None  # the kid currently accruing time, if any
 
     logger.info("Starting console-user + lock-state detection loop (Ctrl+C to stop).")
@@ -208,15 +243,40 @@ def main() -> None:
             locked = is_screen_locked()
             all_sessions = get_all_logged_in_sessions()
 
+            # General lock-state visibility for ANY console user, not just
+            # managed kids — the PAUSE/RESUME messages below only fire for
+            # managed accounts (they're the only ones with a budget to
+            # pause), so without this, locking as e.g. an admin account
+            # produces no log line at all. Useful for confirming lock
+            # detection is working in general while testing as yourself.
+            if locked != last_seen_locked:
+                logger.info(
+                    "Lock state changed: locked=%s (console user='%s').",
+                    locked,
+                    current_user,
+                )
+                last_seen_locked = locked
+
             if current_user != last_seen_user:
                 if current_user is None:
                     logger.info("Console is at the login window (nobody logged in).")
-                elif registry.child_for(current_user) is None:
-                    logger.info(
-                        "Console user changed to '%s' (not a managed account, "
-                        "e.g. an admin session).",
-                        current_user,
-                    )
+                else:
+                    child = registry.child_for(current_user)
+                    if child is not None:
+                        logger.info(
+                            "Console user changed to '%s' -> managed child '%s' "
+                            "(locked=%s).",
+                            current_user,
+                            child,
+                            locked,
+                        )
+                    else:
+                        logger.info(
+                            "Console user changed to '%s' (not a managed account, "
+                            "e.g. an admin session) (locked=%s).",
+                            current_user,
+                            locked,
+                        )
                 last_seen_user = current_user
 
             # Who SHOULD be accruing time right now: the console user, if
