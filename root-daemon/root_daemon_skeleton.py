@@ -387,6 +387,14 @@ def allow_topic(topic_prefix: str) -> str:
     return f"{topic_prefix}/allowed"
 
 
+def daily_budget_topic(child: str, device_id: str) -> str:
+    """Matches screentime_enforcer.py's budget_state_topic exactly:
+    homeassistant/{child}_{device_id}_mac/daily_budget/state — this is the
+    HA-managed `number` entity's own state/command topic (same topic for
+    both), not something under our screen/... namespace."""
+    return f"homeassistant/{child}_{device_id}_mac/daily_budget/state"
+
+
 def _as_bool(payload: str) -> Optional[bool]:
     """Matches screentime_enforcer.py's _as_bool exactly."""
     normalized = payload.strip().lower()
@@ -532,6 +540,19 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
     "Make sure your parents have given you access."
 )
 
+# New — not in screentime_enforcer.py at all (its budget warnings only
+# cover 5 and 1 minutes remaining, and it never announces a budget
+# CHANGE, only the remaining time at login). Thresholds checked in
+# descending order; BUDGET_WARNING_TEXT keys must match exactly.
+BUDGET_SET_VOICE = "Your daily screen time limit has been set to {minutes} minutes."
+BUDGET_WARNING_THRESHOLDS = [15, 10, 5, 1]
+BUDGET_WARNING_TEXT = {
+    15: "15 minutes of screen time remaining.",
+    10: "10 minutes of screen time remaining.",
+    5: "5 minutes of screen time remaining.",
+    1: "1 minute of screen time remaining.",
+}
+
 
 # New topic, matching the device-scoped pattern of minutes/active/
 # session_state — a kid could in principle have a session backgrounded
@@ -631,18 +652,20 @@ def build_mqtt_client(
     mqtt_config: DaemonMqttConfig,
     registry: ManagedUserRegistry,
     allowed_state: dict,
+    budget_state: dict,
 ) -> mqtt.Client:
     """
     ONE client for the whole machine (requirement #4), not one per kid —
     the actual architectural point of this rewrite. client_id is keyed by
     device only.
 
-    allowed_state is a plain dict the caller owns — this function's
-    on_message callback writes into it (from paho's background thread,
-    via loop_start()) and main()'s poll loop reads from it (main thread).
-    No lock around that: matches the original agent's own informal
-    thread-safety model (self._allowed touched from both threads there
-    too), fine for simple last-write-wins on a single value per key.
+    allowed_state/budget_state are plain dicts the caller owns — this
+    function's on_message callback writes into them (from paho's
+    background thread, via loop_start()) and main()'s poll loop reads
+    from them (main thread). No lock around that: matches the original
+    agent's own informal thread-safety model (self._allowed touched from
+    both threads there too), fine for simple last-write-wins on a single
+    value per key.
     """
     client_id = f"ha-root-daemon-{mqtt_config.device_id}"
     client = mqtt.Client(
@@ -679,6 +702,7 @@ def build_mqtt_client(
             # immediately via on_message below, same as the original
             # agent's own _on_connect subscribe.
             client.subscribe(allow_topic(prefix))
+            client.subscribe(daily_budget_topic(child, mqtt_config.device_id))
             client.publish(
                 availability_topic(prefix, mqtt_config.device_id),
                 payload="online",
@@ -736,6 +760,34 @@ def build_mqtt_client(
                 qos=1,
             )
 
+            # Same retain fix, same reasoning, for the daily_budget number
+            # entity — confirmed on the real broker this topic currently
+            # has NO retained value at all for cj, consistent with the
+            # same missing "retain": true gap in the original's discovery
+            # config.
+            budget_topic = daily_budget_topic(child, mqtt_config.device_id)
+            budget_discovery_topic = f"homeassistant/number/{base_id}_daily_budget_minutes/config"
+            budget_discovery_payload = {
+                "name": f"{child} Mac Daily Budget (min)",
+                "unique_id": f"{base_id}_daily_budget_minutes",
+                "state_topic": budget_topic,
+                "command_topic": budget_topic,
+                "min": 0,
+                "max": 240,
+                "step": 5,
+                "mode": "box",
+                "retain": True,
+                "unit_of_measurement": "min",
+                "icon": "mdi:timer-sand",
+                "device": _discovery_device(child, mqtt_config.device_id),
+            }
+            client.publish(
+                budget_discovery_topic,
+                json.dumps(budget_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
     def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
         rc = int(getattr(reason_code, "value", reason_code))
         if rc != 0:
@@ -747,8 +799,28 @@ def build_mqtt_client(
         for prefix in [registry.topic_prefix_for(child)]
         if prefix
     }
+    budget_topic_to_child = {
+        daily_budget_topic(child, mqtt_config.device_id): child
+        for child in registry.all_children()
+    }
 
     def on_message(client, userdata, message):
+        if message.topic in budget_topic_to_child:
+            child = budget_topic_to_child[message.topic]
+            payload = (message.payload or b"").decode("utf-8", errors="ignore")
+            try:
+                budget_value = max(0.0, float(payload))
+            except ValueError:
+                logger.warning(
+                    "Received invalid budget payload '%s' on %s", payload, message.topic
+                )
+                return
+            previous = budget_state.get(child)
+            budget_state[child] = budget_value
+            if previous != budget_value:
+                logger.info("Budget for '%s' updated to %s minutes.", child, budget_value)
+            return
+
         child = topic_to_child.get(message.topic)
         if child is None:
             return
@@ -782,7 +854,18 @@ def main() -> None:
     # read here in main()'s poll loop (main thread) — see build_mqtt_client's
     # docstring for why no lock is used.
     allowed_state: dict = {}
+    budget_state: dict = {}  # child -> float minutes, written the same way as allowed_state
     grace_started_at: dict = {}  # per-kid, only used when fail_mode="grace"
+
+    # Budget voice warnings — new, not in screentime_enforcer.py (which
+    # only covers 5/1 minutes remaining and never announces a budget
+    # CHANGE). last_announced_budget seeds silently on first sight per
+    # child (so login doesn't announce a "change" that never happened),
+    # then only speaks on a genuine later difference. budget_warned_thresholds
+    # is per-kid, cleared whenever remaining rises back above all
+    # thresholds (budget increased, or a new day once persistence exists).
+    last_announced_budget: dict = {}  # child -> float
+    budget_warned_thresholds: dict = {}  # child -> set[int]
 
     # Rapid-relogin protection state, all per-kid (dict keyed by child
     # name) — each kid accumulates their own independent streak, matching
@@ -797,7 +880,7 @@ def main() -> None:
     last_locked_while_enforced: dict = {}  # child -> bool, last `locked` seen for them
     blocked_unlock_counted: dict = {}  # child -> bool, matches original's per-instance flag
 
-    mqtt_client = build_mqtt_client(mqtt_config, registry, allowed_state)
+    mqtt_client = build_mqtt_client(mqtt_config, registry, allowed_state, budget_state)
     logger.info(
         "Connecting to MQTT %s:%s as device '%s'.",
         mqtt_config.mqtt_host,
@@ -1089,6 +1172,44 @@ def main() -> None:
                             qos=1,
                         )
                     last_published_minutes[active_child] = minutes
+
+                # Budget voice warnings — announce a genuine change (not
+                # the first value ever seen, which just seeds silently),
+                # then check the 15/10/5/1-minutes-remaining thresholds.
+                # NOTE: remaining is computed from accumulated_seconds,
+                # which is in-memory only (see comment above accumulated_
+                # seconds) — these warnings inherit that same
+                # not-persisted-across-restarts limitation.
+                current_budget = budget_state.get(active_child)
+                if current_budget is not None:
+                    prev_announced = last_announced_budget.get(active_child)
+                    voice_prefix = registry.topic_prefix_for(active_child)
+                    if prev_announced is None:
+                        last_announced_budget[active_child] = current_budget
+                    elif current_budget != prev_announced and voice_prefix:
+                        speak(
+                            mqtt_client,
+                            voice_prefix,
+                            mqtt_config.device_id,
+                            BUDGET_SET_VOICE.format(minutes=int(current_budget)),
+                        )
+                        last_announced_budget[active_child] = current_budget
+                        budget_warned_thresholds[active_child] = set()  # new budget, fresh thresholds
+
+                    remaining = current_budget - accumulated_seconds[active_child] / 60.0
+                    warned = budget_warned_thresholds.setdefault(active_child, set())
+                    if remaining > max(BUDGET_WARNING_THRESHOLDS):
+                        warned.clear()
+                    elif voice_prefix:
+                        for threshold in BUDGET_WARNING_THRESHOLDS:
+                            if remaining <= threshold and threshold not in warned:
+                                speak(
+                                    mqtt_client,
+                                    voice_prefix,
+                                    mqtt_config.device_id,
+                                    BUDGET_WARNING_TEXT[threshold],
+                                )
+                                warned.add(threshold)
 
             if all_sessions != last_seen_sessions:
                 for user, uid in all_sessions.items():
