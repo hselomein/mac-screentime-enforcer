@@ -328,17 +328,32 @@ class DaemonMqttConfig:
             sample_interval_seconds=float(data.get("sample_interval_seconds", 15)),
             fail_mode=fail_mode,
             fail_grace_minutes=float(data.get("root_daemon_fail_grace_minutes", 120)),
-            # Read directly under their original screentime_enforcer.py
-            # names — unlike fail_mode, these are plain numeric/boolean
-            # settings the old agent also reads unmodified; no risk of
-            # breaking its own validation since we never write to this
-            # file, only read it.
+            # rapid_relogin_shutdown_enabled/window_seconds/warn_voice: read
+            # directly under their original screentime_enforcer.py names —
+            # these are plain settings valid for both tools, no conflict.
+            # max_attempts/warn_attempt get root_daemon_-prefixed overrides
+            # (same pattern as fail_mode above), since these are the ones
+            # actually worth deliberately tuning for a one-off test (e.g.
+            # a lower threshold to verify the shutdown path actually
+            # fires) without silently changing the still-installed old
+            # agent's real production behavior if it's later re-enabled
+            # without remembering to revert this file.
             rapid_relogin_shutdown_enabled=bool(
                 data.get("rapid_relogin_shutdown_enabled", True)
             ),
             rapid_relogin_window_seconds=float(data.get("rapid_relogin_window_seconds", 60)),
-            rapid_relogin_max_attempts=int(data.get("rapid_relogin_max_attempts", 4)),
-            rapid_relogin_warn_attempt=int(data.get("rapid_relogin_warn_attempt", 3)),
+            rapid_relogin_max_attempts=int(
+                data.get(
+                    "root_daemon_rapid_relogin_max_attempts",
+                    data.get("rapid_relogin_max_attempts", 4),
+                )
+            ),
+            rapid_relogin_warn_attempt=int(
+                data.get(
+                    "root_daemon_rapid_relogin_warn_attempt",
+                    data.get("rapid_relogin_warn_attempt", 3),
+                )
+            ),
             rapid_relogin_warn_voice=bool(data.get("rapid_relogin_warn_voice", True)),
         )
 
@@ -502,8 +517,14 @@ def lock_session(uid: int, expected_mac_user: str) -> bool:
 # "voice warnings" work item, explicitly deprioritized below rapid-relogin
 # shutdown escalation. This is scoped to just what the shutdown escalation
 # itself needs.
-RAPID_RELOGIN_WARN_VOICE_ONE = "Warning. One more login attempt will shut down this computer."
-RAPID_RELOGIN_WARN_VOICE_MANY = "Warning. {count} more login attempts will shut down this computer."
+RAPID_RELOGIN_WARN_VOICE_ONE = (
+    "Warning. The next login attempt will shut down this computer. "
+    "Make sure your parents have given you access."
+)
+RAPID_RELOGIN_WARN_VOICE_MANY = (
+    "Warning. {count} more login attempts will shut down this computer. "
+    "Make sure your parents have given you access."
+)
 
 
 def speak(text: str) -> None:
