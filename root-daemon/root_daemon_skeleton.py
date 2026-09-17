@@ -663,7 +663,23 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
 # "my parent gave me more time" apart from "my parent's initial daily
 # limit" without having to do the math themselves.
 def _minutes_text(n: int) -> str:
-    return "1 minute" if n == 1 else f"{n} minutes"
+    """
+    Formats a minute count for speech — "75" becomes "1 hour and 15
+    minutes" rather than a raw number, per a real request (a kid found
+    bare minute counts hard to parse by ear once they got into the
+    hundreds). Anything under an hour is unchanged (just "N minutes" /
+    "1 minute"). Doesn't affect BUDGET_WARNING_TEXT's hardcoded 15/10/5/1
+    strings — those are always under an hour, so hour-formatting never
+    applies to them anyway.
+    """
+    if n < 60:
+        return "1 minute" if n == 1 else f"{n} minutes"
+    hours, minutes = divmod(n, 60)
+    hour_text = "1 hour" if hours == 1 else f"{hours} hours"
+    if minutes == 0:
+        return hour_text
+    minute_text = "1 minute" if minutes == 1 else f"{minutes} minutes"
+    return f"{hour_text} and {minute_text}"
 
 
 BUDGET_INITIAL_VOICE = "Your daily screen time limit has been set to {minutes}."
