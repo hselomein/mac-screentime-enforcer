@@ -558,6 +558,7 @@ def speak(text: str, mac_user: str) -> None:
 
     Takes the mac username (not uid) since `sudo -u` wants one.
     """
+    started = time.monotonic()
     try:
         subprocess.run(
             ["/usr/bin/sudo", "-u", mac_user, "/usr/bin/say", text],
@@ -565,8 +566,27 @@ def speak(text: str, mac_user: str) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # DEBUG (temporary): real-hardware testing 2026-09-17 showed the
+        # full rapid-relogin cycle completing (attempt logged -> lock
+        # fired) in under a second even at the warning step, with no
+        # audible voice and no exception here either — too fast for a
+        # ~15-word phrase to have actually played. This logs exactly how
+        # long the subprocess call took, to settle whether `say` is
+        # returning before playback finishes (rather than guessing from
+        # what's audible) — remove once the actual cause is confirmed.
+        logger.info(
+            "speak() subprocess for '%s' took %.2fs (text was %d chars).",
+            mac_user,
+            time.monotonic() - started,
+            len(text),
+        )
     except (subprocess.CalledProcessError, OSError):
-        logger.warning("Failed to play voice alert.", exc_info=True)
+        logger.warning(
+            "Failed to play voice alert for '%s' after %.2fs.",
+            mac_user,
+            time.monotonic() - started,
+            exc_info=True,
+        )
 
 
 def shutdown_computer() -> None:
