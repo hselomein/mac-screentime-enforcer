@@ -41,48 +41,67 @@ Hardened macOS LaunchAgent that tracks a child’s Mac usage, reports it to Home
 - **Discovery entities**: minutes sensor, active binary sensor, allowed switch, daily budget number (HA-managed), parent override switch (HA-managed), optional active app sensor.
 - **Daily reset**: the agent resets its local minutes at midnight while running. If it is offline at midnight, wrap the minutes sensor in a HA `utility_meter` with a daily cycle to keep a strict per-day view.
 
-### Example automations (MQTT discovery)
+### Budget enforcement automation
 
-Update IDs to match your discovered entities (`base_id = child_id + "_" + device_id + "_mac"`):
+**Use the blueprint** at `homeassistant/blueprints/kid_mac_budget_enforcement.yaml`
+instead of hand-copying YAML per kid — import it into Home Assistant once
+(Settings → Automations & Scenes → Blueprints → Import Blueprint, or drop the
+file into your `config/blueprints/automation/` folder), then create one
+automation per managed kid from it, filling in that kid's four entities
+(minutes sensor, daily budget number, parent override switch, allowed MQTT
+topic).
+
+This fixes a real gap an earlier version of this example had: it only
+triggered on the minutes sensor changing. That's fine while a kid is
+actively using their budget, but once they're already locked out, minutes
+stops changing (they're not using the computer) — so increasing their
+budget at that point would silently do nothing, since nothing was left to
+re-trigger the automation. The blueprint triggers on **both** the minutes
+sensor and the daily budget number, so a budget change re-evaluates
+`allowed` immediately, even while a kid is currently locked out.
+
+For reference, this is the underlying automation each blueprint-created
+instance is equivalent to (with `!input` values filled in for one kid):
 
 ```yaml
-automation:
-  - alias: "Kiddo Mac Budget Enforcement"
-    description: "Publishes allowed=0/1 based on minutes vs budget (skips when parent override is on)."
-    trigger:
-      - platform: state
-        entity_id: sensor.kiddo_macbookpro_mac_minutes
-    condition:
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: switch.kiddo_macbookpro_mac_parent_override
-            state: "on"
-    action:
-      - choose:
-          - conditions:
-              - condition: numeric_state
-                entity_id: sensor.kiddo_macbookpro_mac_minutes
-                above: number.kiddo_macbookpro_mac_daily_budget_min
-            sequence:
-              - service: mqtt.publish
-                data:
-                  topic: screen/kiddo/allowed
-                  qos: 1
-                  retain: true
-                  payload: "0"
-          - conditions:
-              - condition: numeric_state
-                entity_id: sensor.kiddo_macbookpro_mac_minutes
-                below: number.kiddo_macbookpro_mac_daily_budget_min
-            sequence:
-              - service: mqtt.publish
-                data:
-                  topic: screen/kiddo/allowed
-                  qos: 1
-                  retain: true
-                  payload: "1"
-    mode: single
+alias: "Kiddo Mac Budget Enforcement"
+description: "Publishes allowed=0/1 based on minutes vs budget, retained. Skips when parent override is on."
+triggers:
+  - entity_id: sensor.kiddo_macbookpro_mac_minutes
+    trigger: state
+  - entity_id: number.kiddo_macbookpro_mac_daily_budget_min
+    trigger: state
+conditions:
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: switch.kiddo_macbookpro_mac_parent_override
+        state: "on"
+actions:
+  - choose:
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.kiddo_macbookpro_mac_minutes
+            above: number.kiddo_macbookpro_mac_daily_budget_min
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: screen/kiddo/allowed
+              qos: 1
+              retain: true
+              payload: "0"
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.kiddo_macbookpro_mac_minutes
+            below: number.kiddo_macbookpro_mac_daily_budget_min
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: screen/kiddo/allowed
+              qos: 1
+              retain: true
+              payload: "1"
+mode: single
 
   - alias: "Kiddo Mac - Reset each morning"
     trigger:
@@ -163,7 +182,9 @@ pattern read  $
 ├── config/agent.config.sample.json   # Sample root-controlled config
 ├── scripts/install_service.sh        # Parent-facing installer (run with sudo)
 ├── requirements.txt                  # Python deps (PyObjC, MQTT, etc.)
-└── homeassistant/                    # Example HA snippets & docs
+├── homeassistant/                    # Example HA snippets & docs
+│   └── blueprints/                   # Reusable automation blueprints (import into HA)
+└── root-daemon/                      # In-progress root-daemon rewrite (see umbrella repo's Context/HANDOFF.md)
 ```
 
 ## Security & hardening

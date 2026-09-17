@@ -1,0 +1,91 @@
+blueprint:
+  name: Kid Mac Budget Enforcement
+  description: >-
+    Publishes allowed=0/1 based on minutes vs daily budget for one managed
+    kid's Mac, retained. Skips enforcement while that kid's Parent Override
+    switch is on.
+
+    Re-evaluates on BOTH the minutes sensor changing AND the daily budget
+    number changing — not just minutes. That second trigger matters: without
+    it, increasing a kid's budget while they're already locked out (and so
+    no longer accruing minutes) would never re-publish `allowed`, since
+    nothing would be left to trigger the automation. Confirmed as a real gap
+    in an earlier example that only triggered on minutes; fixed here.
+
+    Import this blueprint once, then create one automation per managed kid
+    from it, pointing the four inputs at that kid's own entities/topic —
+    no need to hand-edit a copy of the YAML per kid.
+  domain: automation
+  source_url: null
+  input:
+    minutes_sensor:
+      name: Minutes Sensor
+      description: The kid's Mac minutes-today sensor (e.g. sensor.cj_mac_cj_mac_minutes).
+      selector:
+        entity:
+          domain: sensor
+    daily_budget_entity:
+      name: Daily Budget Number
+      description: >-
+        The kid's daily budget (minutes) number entity (e.g.
+        number.cj_mac_cj_mac_daily_budget_min).
+      selector:
+        entity:
+          domain: number
+    parent_override_switch:
+      name: Parent Override Switch
+      description: >-
+        The kid's parent override switch (e.g.
+        switch.cj_mac_cj_mac_parent_override) — while on, this automation
+        does nothing, letting a parent hold `allowed` at whatever they've
+        manually set regardless of minutes/budget.
+      selector:
+        entity:
+          domain: switch
+    allowed_topic:
+      name: Allowed MQTT Topic
+      description: >-
+        The MQTT topic to publish the allowed state to, matching that kid's
+        topic_prefix in config.json (e.g. screen/cj/allowed).
+      selector:
+        text: {}
+
+triggers:
+  - entity_id: !input minutes_sensor
+    trigger: state
+  - entity_id: !input daily_budget_entity
+    trigger: state
+
+conditions:
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: !input parent_override_switch
+        state: "on"
+
+actions:
+  - choose:
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input minutes_sensor
+            above: !input daily_budget_entity
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: !input allowed_topic
+              qos: 1
+              retain: true
+              payload: "0"
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input minutes_sensor
+            below: !input daily_budget_entity
+        sequence:
+          - action: mqtt.publish
+            data:
+              topic: !input allowed_topic
+              qos: 1
+              retain: true
+              payload: "1"
+
+mode: single
