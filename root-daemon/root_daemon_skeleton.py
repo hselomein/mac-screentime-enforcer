@@ -67,9 +67,15 @@ import paho.mqtt.client as mqtt  # type: ignore
 # ioreg's IOConsoleUsers rather than a Quartz/notification-based approach.
 
 # Also logs to a file (world-readable, since this runs as root but is
-# meant to be inspected afterward as a regular user) so test output can be
-# reviewed after the fact without needing to watch the SSH session live.
-LOG_FILE_PATH = "/tmp/root_daemon_skeleton.log"
+# meant to be inspected afterward as a regular user) so test output can
+# be reviewed after the fact without needing to watch the SSH session
+# live. /var/log, NOT /tmp — confirmed the hard way: macOS clears /tmp
+# on every reboot, which silently destroyed the log from the one test
+# that actually triggered a real reboot (the rapid-relogin shutdown
+# test). /var/log survives reboots, and matches where the real installed
+# daemon's plist (com.ha.screen-daemon.plist) already expects its own
+# logs to live.
+LOG_FILE_PATH = "/var/log/root_daemon_skeleton.log"
 
 _file_handler = logging.FileHandler(LOG_FILE_PATH)
 _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
