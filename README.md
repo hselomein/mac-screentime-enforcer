@@ -103,6 +103,9 @@ actions:
               payload: "1"
 mode: single
 
+  # bonus_minutes below is published by the root-daemon rewrite
+  # (root-daemon/), not this agent — omit that step if you're only
+  # running screentime_enforcer.py.
   - alias: "Kiddo Mac - Reset each morning"
     trigger:
       - platform: time
@@ -114,8 +117,18 @@ mode: single
       - service: switch.turn_off
         target:
           entity_id: switch.kiddo_macbookpro_mac_parent_override
-      # Minutes reset locally at midnight; add more reset tasks here if needed
+      - service: number.set_value
+        target:
+          entity_id: number.kiddo_macbookpro_mac_bonus_minutes
+        data:
+          value: 0
+      # Minutes reset locally at midnight in the root-daemon (persisted,
+      # see Context/HANDOFF.md's UsageState). daily_budget and
+      # max_bonus_minutes are deliberately NOT reset here — see the
+      # kid_mac_daily_reset blueprint's description for why.
 ```
+
+There's also a matching blueprint for this one, `homeassistant/blueprints/kid_mac_daily_reset.yaml` — same reasoning as the budget-enforcement blueprint: import once, create one automation per kid from it instead of hand-copying/editing this YAML.
 
 ## Configuration
 Configuration lives in `/Library/Application Support/ha-screen-agent/config.json`
