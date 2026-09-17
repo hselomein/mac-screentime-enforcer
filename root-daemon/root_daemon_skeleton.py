@@ -527,17 +527,32 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
 )
 
 
-def speak(text: str) -> None:
+def speak(text: str, uid: int) -> None:
     """
-    Matches screentime_enforcer.py's _speak. `say` plays through the
-    machine's one physical audio output, same as pmset's one physical
-    display — a system-wide effect, not session-scoped, so this needs no
-    launchctl asuser wrapping (same reasoning as lock_session's use of
-    pmset, and shutdown_computer's direct root-level shutdown below).
+    Matches screentime_enforcer.py's _speak, EXCEPT this needed a real
+    fix after real-hardware testing: originally assumed `say` would work
+    directly as root, reasoning that audio output is a single physical
+    device, same as pmset's single physical display — but confirmed on
+    real hardware 2026-09-17 that a full rapid-relogin shutdown fired
+    correctly with NO audible warning beforehand. Unlike pmset (which
+    only needs to affect *the display*, a stateless hardware action),
+    audio playback via CoreAudio needs an actual audio session to attach
+    to — and a root process with no GUI session of its own doesn't have
+    one, so `say` most likely ran but produced no sound. This was an
+    unverified assumption I should have tested before trusting, like
+    everything else in this file — noting it here since it's a real
+    lesson: "single physical output device" doesn't automatically mean
+    "works from root with no session," the pmset case doesn't generalize
+    to audio.
+
+    Now routes through `launchctl asuser <uid>` like lock_session, so it
+    runs inside the target console user's own session/audio context.
+    STILL NOT CONFIRMED WORKING on real hardware as of this fix — verify
+    before relying on it.
     """
     try:
         subprocess.run(
-            ["/usr/bin/say", text],
+            ["/bin/launchctl", "asuser", str(uid), "/usr/bin/say", text],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -1011,14 +1026,16 @@ def main() -> None:
                                     0,
                                     mqtt_config.rapid_relogin_max_attempts - attempt_count,
                                 )
-                                if remaining_attempts > 0:
+                                speak_uid = all_sessions.get(current_user)
+                                if remaining_attempts > 0 and speak_uid is not None:
                                     if remaining_attempts == 1:
-                                        speak(RAPID_RELOGIN_WARN_VOICE_ONE)
+                                        speak(RAPID_RELOGIN_WARN_VOICE_ONE, speak_uid)
                                     else:
                                         speak(
                                             RAPID_RELOGIN_WARN_VOICE_MANY.format(
                                                 count=remaining_attempts
-                                            )
+                                            ),
+                                            speak_uid,
                                         )
                                 rapid_relogin_warned_count[enforced_child] = attempt_count
                             if attempt_count >= mqtt_config.rapid_relogin_max_attempts:
