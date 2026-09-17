@@ -46,6 +46,8 @@ import plistlib
 import subprocess
 import time
 import logging
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 # SCDynamicStore gives us the actual logged-in console user, correctly
@@ -200,6 +202,93 @@ def get_all_logged_in_sessions() -> dict[str, int]:
             except ValueError:
                 continue
     return sessions
+
+
+def _now_local() -> datetime:
+    """Matches screentime_enforcer.py's _now_local exactly."""
+    return datetime.now().astimezone()
+
+
+def usage_state_path(child: str) -> str:
+    """
+    One state file per kid, root-owned — NOT screentime_enforcer.py's
+    per-instance `state_path` (which lives under that kid's own home
+    directory, since the original agent runs natively in their session).
+    This daemon runs as root for every kid at once, so their state files
+    live together in one root-owned location instead.
+    """
+    return f"/Library/Application Support/ha-screen-agent/root-daemon-state/{child}.json"
+
+
+class UsageState:
+    """
+    Matches screentime_enforcer.py's UsageState class closely (same file
+    format, same atomic-write pattern, same local-midnight reset logic),
+    generalized to one instance per kid instead of one per agent process.
+
+    This is the actual fix for the confusing behavior found during
+    testing 2026-09-17: accumulated usage was tracked in-memory only, so
+    it never reset and had no relationship to "minutes used TODAY" in the
+    way a parent would expect — a long testing session could leave a kid
+    looking like they'd already used most of a freshly-set small budget,
+    purely from earlier unrelated testing activity. Persisting to disk
+    with a real local-date check fixes both problems: survives daemon
+    restarts, and actually resets at local midnight rather than only at
+    process start.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._data = {
+            "date": _now_local().date().isoformat(),
+            "seconds_today": 0.0,
+        }
+        self._load()
+
+    def _load(self) -> None:
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if data.get("date") == _now_local().date().isoformat():
+                self._data = {
+                    "date": data.get("date"),
+                    "seconds_today": float(data.get("seconds_today", 0.0)),
+                }
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            logger.warning(
+                "Failed to read state file %s, starting fresh.", self.path, exc_info=True
+            )
+
+    def add_seconds(self, seconds: float) -> None:
+        self._data["seconds_today"] = float(self._data.get("seconds_today", 0.0)) + max(
+            0.0, seconds
+        )
+
+    def minutes_today(self) -> int:
+        return int(self._data.get("seconds_today", 0.0) // 60)
+
+    def ensure_today(self) -> None:
+        """Call every poll tick, for every kid (not just whoever's
+        active) — matches the original's ensure_today, needed so a kid
+        who's backgrounded (not accruing time right now) still gets reset
+        correctly if the daemon happens to be running across local
+        midnight while they're not the one active."""
+        today = _now_local().date().isoformat()
+        if self._data.get("date") != today:
+            self._data = {"date": today, "seconds_today": 0.0}
+            self.save()
+
+    def save(self) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.path.with_suffix(".tmp")
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(self._data, handle)
+            tmp_path.replace(self.path)
+        except OSError:
+            logger.error("Unable to persist usage state to %s.", self.path, exc_info=True)
 
 
 class ManagedUserRegistry:
@@ -546,11 +635,12 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
 # descending order; BUDGET_WARNING_TEXT keys must match exactly.
 #
 # Three distinct budget-change phrasings, not one: the first value ever
-# observed for a kid (this daemon run — not persisted, see main()'s notes
-# on accumulated_seconds) gets the plain "set to" phrasing; any value that
-# changes AFTER that gets increase/decrease-specific phrasing with the
-# delta, so a kid can tell "my parent gave me more time" apart from "my
-# parent's initial daily limit" without having to do the math themselves.
+# observed for a kid (this daemon run — last_announced_budget itself is
+# NOT persisted, unlike actual usage minutes; see UsageState) gets the
+# plain "set to" phrasing; any value that changes AFTER that gets
+# increase/decrease-specific phrasing with the delta, so a kid can tell
+# "my parent gave me more time" apart from "my parent's initial daily
+# limit" without having to do the math themselves.
 def _minutes_text(n: int) -> str:
     return "1 minute" if n == 1 else f"{n} minutes"
 
@@ -869,6 +959,14 @@ def main() -> None:
     registry = ManagedUserRegistry(CONFIG_PATH)
     mqtt_config = DaemonMqttConfig.load(CONFIG_PATH)
 
+    # One persisted UsageState per kid — see that class's docstring for
+    # why this replaced a plain in-memory accumulated_seconds dict.
+    usage_states: dict[str, UsageState] = {
+        child: UsageState(Path(usage_state_path(child))) for child in registry.all_children()
+    }
+    last_state_save = time.monotonic()
+    STATE_SAVE_INTERVAL_SECONDS = 30.0  # matches screentime_enforcer.py's own cadence
+
     # Written by build_mqtt_client's on_message (background MQTT thread),
     # read here in main()'s poll loop (main thread) — see build_mqtt_client's
     # docstring for why no lock is used.
@@ -914,11 +1012,6 @@ def main() -> None:
     last_seen_locked: Optional[bool] = None  # sentinel, always logs the first reading
     active_child: Optional[str] = None  # the kid currently accruing time, if any
 
-    # In-memory only — NOT persisted across restarts, and NOT reset at
-    # local midnight. Good enough to prove MQTT wiring end-to-end in HA;
-    # matching screentime_enforcer.py's UsageState (file-backed, proper
-    # daily reset) is separate follow-up work, not in scope for this pass.
-    accumulated_seconds: dict[str, float] = {}
     last_published_minutes: dict[str, int] = {}
     last_published_state: dict[str, str] = {}
 
@@ -928,6 +1021,19 @@ def main() -> None:
             current_user = get_console_user()
             locked = is_screen_locked()
             all_sessions = get_all_logged_in_sessions()
+
+            # Every kid, every tick — not just whoever's active, so a
+            # backgrounded kid's usage still resets correctly if the
+            # daemon happens to be running across local midnight while
+            # they're not the one active. Matches screentime_enforcer.py's
+            # own ensure_today() being called every loop tick.
+            for child in registry.all_children():
+                usage_states[child].ensure_today()
+
+            if time.monotonic() - last_state_save >= STATE_SAVE_INTERVAL_SECONDS:
+                for child in registry.all_children():
+                    usage_states[child].save()
+                last_state_save = time.monotonic()
 
             # Per-kid session_state, for EVERY managed kid, not just
             # whoever's currently active — richer than the boolean
@@ -1172,15 +1278,12 @@ def main() -> None:
                             )
                             lock_session(uid, expected_mac_user=current_user)
 
-            # Minute accumulation + publish — in-memory only, see main()'s
-            # comment above accumulated_seconds for what's NOT yet ported
-            # (persistence, daily reset). Publishes only when the whole
-            # minutes value actually changes, not every poll tick.
+            # Minute accumulation + publish — persisted per kid (see
+            # UsageState), resets at local midnight. Publishes only when
+            # the whole minutes value actually changes, not every tick.
             if active_child is not None:
-                accumulated_seconds[active_child] = (
-                    accumulated_seconds.get(active_child, 0.0) + POLL_INTERVAL_SECONDS
-                )
-                minutes = int(accumulated_seconds[active_child] // 60)
+                usage_states[active_child].add_seconds(POLL_INTERVAL_SECONDS)
+                minutes = usage_states[active_child].minutes_today()
                 if minutes != last_published_minutes.get(active_child):
                     prefix = registry.topic_prefix_for(active_child)
                     if prefix:
@@ -1193,12 +1296,16 @@ def main() -> None:
                     last_published_minutes[active_child] = minutes
 
                 # Budget voice warnings — the FIRST value ever seen for a
-                # kid (this daemon run — not persisted, see main()'s notes
-                # on accumulated_seconds) gets the plain "set to" phrasing;
-                # any later change gets increase/decrease-specific
-                # phrasing with the delta, so a kid can tell "my parent
-                # gave me more time" apart from the initial daily limit.
-                # Then checks the 15/10/5/1-minutes-remaining thresholds.
+                # kid (this daemon run — last_announced_budget itself is
+                # not persisted) gets the plain "set to" phrasing; any
+                # later change gets increase/decrease-specific phrasing
+                # with the delta, so a kid can tell "my parent gave me
+                # more time" apart from the initial daily limit. Then
+                # checks the 15/10/5/1-minutes-remaining thresholds —
+                # `remaining` is now computed from the persisted
+                # UsageState, so it correctly means "minutes actually
+                # used today," not "minutes active since the daemon
+                # process happened to start."
                 current_budget = budget_state.get(active_child)
                 if current_budget is not None:
                     prev_announced = last_announced_budget.get(active_child)
@@ -1234,7 +1341,7 @@ def main() -> None:
                         last_announced_budget[active_child] = current_budget
                         budget_warned_thresholds[active_child] = set()  # new budget, fresh thresholds
 
-                    remaining = current_budget - accumulated_seconds[active_child] / 60.0
+                    remaining = current_budget - usage_states[active_child].minutes_today()
                     warned = budget_warned_thresholds.setdefault(active_child, set())
                     if remaining > max(BUDGET_WARNING_THRESHOLDS):
                         warned.clear()
@@ -1283,6 +1390,8 @@ def main() -> None:
     except KeyboardInterrupt:
         logger.info("Stopping (Ctrl+C).")
     finally:
+        for child in registry.all_children():
+            usage_states[child].save()
         if active_child is not None:
             prefix = registry.topic_prefix_for(active_child)
             if prefix:
