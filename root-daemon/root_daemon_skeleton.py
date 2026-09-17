@@ -544,7 +544,26 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
 # cover 5 and 1 minutes remaining, and it never announces a budget
 # CHANGE, only the remaining time at login). Thresholds checked in
 # descending order; BUDGET_WARNING_TEXT keys must match exactly.
-BUDGET_SET_VOICE = "Your daily screen time limit has been set to {minutes} minutes."
+#
+# Three distinct budget-change phrasings, not one: the first value ever
+# observed for a kid (this daemon run — not persisted, see main()'s notes
+# on accumulated_seconds) gets the plain "set to" phrasing; any value that
+# changes AFTER that gets increase/decrease-specific phrasing with the
+# delta, so a kid can tell "my parent gave me more time" apart from "my
+# parent's initial daily limit" without having to do the math themselves.
+def _minutes_text(n: int) -> str:
+    return "1 minute" if n == 1 else f"{n} minutes"
+
+
+BUDGET_INITIAL_VOICE = "Your daily screen time limit has been set to {minutes}."
+BUDGET_INCREASED_VOICE = (
+    "Your parent has added {delta} to your daily limit. "
+    "Your daily limit is now {minutes}."
+)
+BUDGET_DECREASED_VOICE = (
+    "Your parent has decreased your daily limit by {delta}. "
+    "Your daily limit is now {minutes}."
+)
 BUDGET_WARNING_THRESHOLDS = [15, 10, 5, 1]
 BUDGET_WARNING_TEXT = {
     15: "15 minutes of screen time remaining.",
@@ -1173,25 +1192,44 @@ def main() -> None:
                         )
                     last_published_minutes[active_child] = minutes
 
-                # Budget voice warnings — announce a genuine change (not
-                # the first value ever seen, which just seeds silently),
-                # then check the 15/10/5/1-minutes-remaining thresholds.
-                # NOTE: remaining is computed from accumulated_seconds,
-                # which is in-memory only (see comment above accumulated_
-                # seconds) — these warnings inherit that same
-                # not-persisted-across-restarts limitation.
+                # Budget voice warnings — the FIRST value ever seen for a
+                # kid (this daemon run — not persisted, see main()'s notes
+                # on accumulated_seconds) gets the plain "set to" phrasing;
+                # any later change gets increase/decrease-specific
+                # phrasing with the delta, so a kid can tell "my parent
+                # gave me more time" apart from the initial daily limit.
+                # Then checks the 15/10/5/1-minutes-remaining thresholds.
                 current_budget = budget_state.get(active_child)
                 if current_budget is not None:
                     prev_announced = last_announced_budget.get(active_child)
                     voice_prefix = registry.topic_prefix_for(active_child)
-                    if prev_announced is None:
-                        last_announced_budget[active_child] = current_budget
-                    elif current_budget != prev_announced and voice_prefix:
+                    if prev_announced is None and voice_prefix:
                         speak(
                             mqtt_client,
                             voice_prefix,
                             mqtt_config.device_id,
-                            BUDGET_SET_VOICE.format(minutes=int(current_budget)),
+                            BUDGET_INITIAL_VOICE.format(
+                                minutes=_minutes_text(int(current_budget))
+                            ),
+                        )
+                        last_announced_budget[active_child] = current_budget
+                    elif (
+                        prev_announced is not None
+                        and current_budget != prev_announced
+                        and voice_prefix
+                    ):
+                        delta = int(current_budget) - int(prev_announced)
+                        template = (
+                            BUDGET_INCREASED_VOICE if delta > 0 else BUDGET_DECREASED_VOICE
+                        )
+                        speak(
+                            mqtt_client,
+                            voice_prefix,
+                            mqtt_config.device_id,
+                            template.format(
+                                delta=_minutes_text(abs(delta)),
+                                minutes=_minutes_text(int(current_budget)),
+                            ),
                         )
                         last_announced_budget[active_child] = current_budget
                         budget_warned_thresholds[active_child] = set()  # new budget, fresh thresholds
