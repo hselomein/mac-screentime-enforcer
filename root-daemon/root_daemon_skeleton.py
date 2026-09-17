@@ -1239,15 +1239,29 @@ def main() -> None:
                     if remaining > max(BUDGET_WARNING_THRESHOLDS):
                         warned.clear()
                     elif voice_prefix:
-                        for threshold in BUDGET_WARNING_THRESHOLDS:
-                            if remaining <= threshold and threshold not in warned:
+                        # Only the single most-specific (lowest) applicable
+                        # threshold ever gets spoken — a big drop (e.g. the
+                        # budget itself gets cut so remaining jumps straight
+                        # to 5 or 0) should say "5 minutes remaining" once,
+                        # not machine-gun 15/10/5 all at once just because
+                        # they were technically all crossed in the same
+                        # tick. Marking every threshold >= the one just
+                        # spoken as warned means a slow, normal countdown
+                        # still fires each threshold individually as it's
+                        # actually reached (only one is ever "applicable"
+                        # at a time in that case) — this only changes
+                        # behavior for a sudden multi-threshold jump.
+                        applicable = [t for t in BUDGET_WARNING_THRESHOLDS if remaining <= t]
+                        if applicable:
+                            threshold = min(applicable)
+                            if threshold not in warned:
                                 speak(
                                     mqtt_client,
                                     voice_prefix,
                                     mqtt_config.device_id,
                                     BUDGET_WARNING_TEXT[threshold],
                                 )
-                                warned.add(threshold)
+                                warned.update(t for t in BUDGET_WARNING_THRESHOLDS if t >= threshold)
 
             if all_sessions != last_seen_sessions:
                 for user, uid in all_sessions.items():
