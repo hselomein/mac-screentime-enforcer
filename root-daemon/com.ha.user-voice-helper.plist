@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+    LaunchAgent (not LaunchDaemon) — runs inside each user's own GUI
+    session, same pattern as the original screentime_enforcer.py agent.
+    Installed to /Library/LaunchAgents/com.ha.user-voice-helper.plist
+    (root:wheel owned, permissions 644) — a system-wide LaunchAgents
+    entry loads automatically into EVERY user's session on login,
+    including non-managed accounts (e.g. the admin) — user_voice_helper.py
+    itself checks whether the current account is a managed kid and exits
+    cleanly if not, so this is safe to load everywhere.
+
+    Exists specifically because root_daemon_skeleton.py (root, no GUI
+    session of its own) cannot reliably produce audio in another user's
+    session by any mechanism tried — see Context/HANDOFF.md, "Voice
+    warnings: UNRESOLVED", before assuming this plist is unnecessary.
+    This helper runs natively inside the target session instead, so
+    `say` just works normally.
+    -->
+    <key>Label</key>
+    <string>com.ha.user-voice-helper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Application Support/ha-screen-agent/venv/bin/python3</string>
+        <string>/Library/Application Support/ha-screen-agent/user_voice_helper.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/ha-user-voice-helper.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/log/ha-user-voice-helper.err.log</string>
+
+    <key>LimitLoadToSessionType</key>
+    <array>
+        <string>Aqua</string>
+    </array>
+</dict>
+</plist>

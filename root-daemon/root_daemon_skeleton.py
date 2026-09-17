@@ -533,60 +533,36 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
 )
 
 
-def speak(text: str, mac_user: str) -> None:
-    """
-    Matches screentime_enforcer.py's _speak, EXCEPT this needed two real
-    fixes after real-hardware testing:
+# New topic, matching the device-scoped pattern of minutes/active/
+# session_state — a kid could in principle have a session backgrounded
+# on more than one machine, so this stays per-device: only the helper
+# actually running on THIS Mac should react.
+def voice_command_topic(topic_prefix: str, device_id: str) -> str:
+    return f"{topic_prefix}/mac/{device_id}/voice_command"
 
-    1. Originally assumed `say` would work directly as root (reasoning
-       that audio, like pmset's display action, is a single physical
-       device and doesn't need session scoping) — confirmed on real
-       hardware 2026-09-17 that a full rapid-relogin shutdown fired with
-       no audible warning beforehand. Wrong: audio playback via CoreAudio
-       needs an actual audio session to attach to, unlike a stateless
-       hardware action like pmset. An unverified assumption, unlike
-       everything else in this file.
-    2. First fix attempt used `launchctl asuser <uid>` (same mechanism as
-       lock_session) — confirmed on real hardware this does NOT produce
-       audio when invoked as root targeting a different uid, even though
-       it works fine for pmset. Manually isolated on real hardware: `sudo
-       -u <username> /usr/bin/say ...` (plain UID switch, no launchctl at
-       all) DOES reliably produce audio; `launchctl asuser` only works
-       for audio when run AS the target user themselves, not as root
-       targeting someone else — exactly the case we need. Confirmed
-       working 2026-09-17.
 
-    Takes the mac username (not uid) since `sudo -u` wants one.
+def speak(mqtt_client: mqtt.Client, topic_prefix: str, device_id: str, text: str) -> None:
     """
-    started = time.monotonic()
-    try:
-        subprocess.run(
-            ["/usr/bin/sudo", "-u", mac_user, "/usr/bin/say", text],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        # DEBUG (temporary): real-hardware testing 2026-09-17 showed the
-        # full rapid-relogin cycle completing (attempt logged -> lock
-        # fired) in under a second even at the warning step, with no
-        # audible voice and no exception here either — too fast for a
-        # ~15-word phrase to have actually played. This logs exactly how
-        # long the subprocess call took, to settle whether `say` is
-        # returning before playback finishes (rather than guessing from
-        # what's audible) — remove once the actual cause is confirmed.
-        logger.info(
-            "speak() subprocess for '%s' took %.2fs (text was %d chars).",
-            mac_user,
-            time.monotonic() - started,
-            len(text),
-        )
-    except (subprocess.CalledProcessError, OSError):
-        logger.warning(
-            "Failed to play voice alert for '%s' after %.2fs.",
-            mac_user,
-            time.monotonic() - started,
-            exc_info=True,
-        )
+    Publishes a voice command for `user_voice_helper.py` (a per-user
+    LaunchAgent, see that file) to speak — does NOT attempt to produce
+    audio itself.
+
+    Direct subprocess approaches (`launchctl asuser`, `sudo -u`, with
+    every combination of redirection/phrase-length/target/Accessibility
+    permission tried) were extensively tested on real hardware 2026-09-17
+    and NONE reliably produced audio when invoked from this daemon (root,
+    no GUI session of its own) targeting another user's session — see
+    Context/HANDOFF.md, "Voice warnings: UNRESOLVED", before attempting
+    another direct fix here. The actual fix is architectural: hand this
+    off to a small helper that runs NATIVELY inside the target kid's own
+    session (same as how the original per-kid agent's audio always
+    worked reliably, since it never had to cross that boundary either),
+    rather than trying to cross the privilege/session boundary directly.
+    Not retained — this is an ephemeral command, not a state value.
+    """
+    mqtt_client.publish(
+        voice_command_topic(topic_prefix, device_id), payload=text, qos=1, retain=False
+    )
 
 
 def shutdown_computer() -> None:
@@ -1054,15 +1030,23 @@ def main() -> None:
                                     0,
                                     mqtt_config.rapid_relogin_max_attempts - attempt_count,
                                 )
-                                if remaining_attempts > 0:
+                                warn_prefix = registry.topic_prefix_for(enforced_child)
+                                if remaining_attempts > 0 and warn_prefix:
                                     if remaining_attempts == 1:
-                                        speak(RAPID_RELOGIN_WARN_VOICE_ONE, current_user)
+                                        speak(
+                                            mqtt_client,
+                                            warn_prefix,
+                                            mqtt_config.device_id,
+                                            RAPID_RELOGIN_WARN_VOICE_ONE,
+                                        )
                                     else:
                                         speak(
+                                            mqtt_client,
+                                            warn_prefix,
+                                            mqtt_config.device_id,
                                             RAPID_RELOGIN_WARN_VOICE_MANY.format(
                                                 count=remaining_attempts
                                             ),
-                                            current_user,
                                         )
                                 rapid_relogin_warned_count[enforced_child] = attempt_count
                             if attempt_count >= mqtt_config.rapid_relogin_max_attempts:

@@ -19,9 +19,16 @@
     <key>Label</key>
     <string>com.ha.screen-daemon</string>
 
+    <!--
+    Uses the production venv's python3, NOT plain /usr/bin/python3 —
+    confirmed on real hardware that plain /usr/bin/python3 as root can't
+    see paho-mqtt (it's installed under a regular user's site-packages,
+    invisible to root). This venv already has paho-mqtt, pyobjc/Quartz,
+    and SystemConfiguration all confirmed working as root.
+    -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>/Library/Application Support/ha-screen-agent/venv/bin/python3</string>
         <string>/Library/Application Support/ha-screen-daemon/daemon.py</string>
     </array>
 
