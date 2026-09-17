@@ -484,6 +484,26 @@ def daily_budget_topic(child: str, device_id: str) -> str:
     return f"homeassistant/{child}_{device_id}_mac/daily_budget/state"
 
 
+# New — bonus time, not in screentime_enforcer.py at all. Two entities,
+# not one: `bonus_minutes` is what a parent actively grants (resets to 0
+# each morning via the same HA automation that resets `allowed`), while
+# `max_bonus_minutes` is a standing cap on how much of it can ever apply
+# on a given day (NOT reset nightly — a policy setting, not a daily
+# value). The daemon computes the effective, CAPPED contribution itself
+# (min(bonus, max_bonus)) rather than trusting the raw bonus value
+# directly, so typing more bonus than the cap allows doesn't actually
+# grant more than the parent's own standing limit.
+def bonus_minutes_topic(child: str, device_id: str) -> str:
+    return f"homeassistant/{child}_{device_id}_mac/bonus_minutes/state"
+
+
+def max_bonus_minutes_topic(child: str, device_id: str) -> str:
+    return f"homeassistant/{child}_{device_id}_mac/max_bonus_minutes/state"
+
+
+DEFAULT_MAX_BONUS_MINUTES = 60.0  # used only if the parent hasn't set one yet
+
+
 def _as_bool(payload: str) -> Optional[bool]:
     """Matches screentime_enforcer.py's _as_bool exactly."""
     normalized = payload.strip().lower()
@@ -634,10 +654,11 @@ RAPID_RELOGIN_WARN_VOICE_MANY = (
 # CHANGE, only the remaining time at login). Thresholds checked in
 # descending order; BUDGET_WARNING_TEXT keys must match exactly.
 #
-# Three distinct budget-change phrasings, not one: the first value ever
-# observed for a kid (this daemon run — last_announced_budget itself is
-# NOT persisted, unlike actual usage minutes; see UsageState) gets the
-# plain "set to" phrasing; any value that changes AFTER that gets
+# Five distinct budget/bonus-change phrasings, not one: the first value
+# ever observed for a kid (this daemon run — last_announced_base/
+# last_announced_bonus_applied are NOT persisted, unlike actual usage
+# minutes; see UsageState) gets the plain "set to" phrasing; any value
+# that changes AFTER that gets
 # increase/decrease-specific phrasing with the delta, so a kid can tell
 # "my parent gave me more time" apart from "my parent's initial daily
 # limit" without having to do the math themselves.
@@ -653,6 +674,18 @@ BUDGET_INCREASED_VOICE = (
 BUDGET_DECREASED_VOICE = (
     "Your parent has decreased your daily limit by {delta}. "
     "Your daily limit is now {minutes}."
+)
+# Distinct phrasing from a plain budget change — bonus is meant to feel
+# like a treat, not a schedule adjustment. "minutes" here is always the
+# full EFFECTIVE total (base + capped bonus), since that's what actually
+# matters to the kid, not the bonus amount in isolation.
+BONUS_GRANTED_VOICE = (
+    "You've received a bonus of {delta}! "
+    "Your total for today is now {minutes}."
+)
+BONUS_REDUCED_VOICE = (
+    "Your bonus time has been reduced by {delta}. "
+    "Your total for today is now {minutes}."
 )
 BUDGET_WARNING_THRESHOLDS = [15, 10, 5, 1]
 BUDGET_WARNING_TEXT = {
@@ -762,16 +795,19 @@ def build_mqtt_client(
     registry: ManagedUserRegistry,
     allowed_state: dict,
     budget_state: dict,
+    bonus_state: dict,
+    max_bonus_state: dict,
 ) -> mqtt.Client:
     """
     ONE client for the whole machine (requirement #4), not one per kid —
     the actual architectural point of this rewrite. client_id is keyed by
     device only.
 
-    allowed_state/budget_state are plain dicts the caller owns — this
-    function's on_message callback writes into them (from paho's
-    background thread, via loop_start()) and main()'s poll loop reads
-    from them (main thread). No lock around that: matches the original
+    allowed_state/budget_state/bonus_state/max_bonus_state are plain
+    dicts the caller owns — this function's on_message callback writes
+    into them (from paho's background thread, via loop_start()) and
+    main()'s poll loop reads from them (main thread). No lock around
+    that: matches the original
     agent's own informal thread-safety model (self._allowed touched from
     both threads there too), fine for simple last-write-wins on a single
     value per key.
@@ -812,6 +848,8 @@ def build_mqtt_client(
             # agent's own _on_connect subscribe.
             client.subscribe(allow_topic(prefix))
             client.subscribe(daily_budget_topic(child, mqtt_config.device_id))
+            client.subscribe(bonus_minutes_topic(child, mqtt_config.device_id))
+            client.subscribe(max_bonus_minutes_topic(child, mqtt_config.device_id))
             client.publish(
                 availability_topic(prefix, mqtt_config.device_id),
                 payload="online",
@@ -897,6 +935,58 @@ def build_mqtt_client(
                 qos=1,
             )
 
+            # Bonus time — see bonus_minutes_topic's comment above for the
+            # bonus/max_bonus split. Two new number entities, same
+            # discovery pattern (retain: true from the start, no
+            # after-the-fact fix needed this time).
+            bonus_topic = bonus_minutes_topic(child, mqtt_config.device_id)
+            bonus_discovery_topic = f"homeassistant/number/{base_id}_bonus_minutes/config"
+            bonus_discovery_payload = {
+                "name": f"{child} Mac Bonus Minutes",
+                "unique_id": f"{base_id}_bonus_minutes",
+                "state_topic": bonus_topic,
+                "command_topic": bonus_topic,
+                "min": 0,
+                "max": 240,
+                "step": 5,
+                "mode": "box",
+                "retain": True,
+                "unit_of_measurement": "min",
+                "icon": "mdi:timer-plus",
+                "device": _discovery_device(child, mqtt_config.device_id),
+            }
+            client.publish(
+                bonus_discovery_topic,
+                json.dumps(bonus_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
+            max_bonus_topic = max_bonus_minutes_topic(child, mqtt_config.device_id)
+            max_bonus_discovery_topic = (
+                f"homeassistant/number/{base_id}_max_bonus_minutes/config"
+            )
+            max_bonus_discovery_payload = {
+                "name": f"{child} Mac Max Bonus Minutes",
+                "unique_id": f"{base_id}_max_bonus_minutes",
+                "state_topic": max_bonus_topic,
+                "command_topic": max_bonus_topic,
+                "min": 0,
+                "max": 240,
+                "step": 5,
+                "mode": "box",
+                "retain": True,
+                "unit_of_measurement": "min",
+                "icon": "mdi:timer-lock",
+                "device": _discovery_device(child, mqtt_config.device_id),
+            }
+            client.publish(
+                max_bonus_discovery_topic,
+                json.dumps(max_bonus_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
     def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
         rc = int(getattr(reason_code, "value", reason_code))
         if rc != 0:
@@ -908,26 +998,45 @@ def build_mqtt_client(
         for prefix in [registry.topic_prefix_for(child)]
         if prefix
     }
-    budget_topic_to_child = {
-        daily_budget_topic(child, mqtt_config.device_id): child
-        for child in registry.all_children()
-    }
+    # One mapping for all three numeric (minutes) topics — budget, bonus,
+    # max_bonus — rather than three near-identical on_message branches:
+    # topic -> (child, the dict to write into, a label for logging).
+    numeric_topic_handlers: dict = {}
+    for child in registry.all_children():
+        numeric_topic_handlers[daily_budget_topic(child, mqtt_config.device_id)] = (
+            child,
+            budget_state,
+            "Budget",
+        )
+        numeric_topic_handlers[bonus_minutes_topic(child, mqtt_config.device_id)] = (
+            child,
+            bonus_state,
+            "Bonus",
+        )
+        numeric_topic_handlers[max_bonus_minutes_topic(child, mqtt_config.device_id)] = (
+            child,
+            max_bonus_state,
+            "Max bonus",
+        )
 
     def on_message(client, userdata, message):
-        if message.topic in budget_topic_to_child:
-            child = budget_topic_to_child[message.topic]
+        if message.topic in numeric_topic_handlers:
+            child, target, label = numeric_topic_handlers[message.topic]
             payload = (message.payload or b"").decode("utf-8", errors="ignore")
             try:
-                budget_value = max(0.0, float(payload))
+                value = max(0.0, float(payload))
             except ValueError:
                 logger.warning(
-                    "Received invalid budget payload '%s' on %s", payload, message.topic
+                    "Received invalid %s payload '%s' on %s",
+                    label.lower(),
+                    payload,
+                    message.topic,
                 )
                 return
-            previous = budget_state.get(child)
-            budget_state[child] = budget_value
-            if previous != budget_value:
-                logger.info("Budget for '%s' updated to %s minutes.", child, budget_value)
+            previous = target.get(child)
+            target[child] = value
+            if previous != value:
+                logger.info("%s for '%s' updated to %s minutes.", label, child, value)
             return
 
         child = topic_to_child.get(message.topic)
@@ -972,16 +1081,21 @@ def main() -> None:
     # docstring for why no lock is used.
     allowed_state: dict = {}
     budget_state: dict = {}  # child -> float minutes, written the same way as allowed_state
+    bonus_state: dict = {}  # child -> float minutes, raw (uncapped) bonus granted today
+    max_bonus_state: dict = {}  # child -> float minutes, standing cap on bonus (not reset nightly)
     grace_started_at: dict = {}  # per-kid, only used when fail_mode="grace"
 
-    # Budget voice warnings — new, not in screentime_enforcer.py (which
-    # only covers 5/1 minutes remaining and never announces a budget
-    # CHANGE). last_announced_budget seeds silently on first sight per
-    # child (so login doesn't announce a "change" that never happened),
-    # then only speaks on a genuine later difference. budget_warned_thresholds
-    # is per-kid, cleared whenever remaining rises back above all
-    # thresholds (budget increased, or a new day once persistence exists).
-    last_announced_budget: dict = {}  # child -> float
+    # Budget/bonus voice warnings — new, not in screentime_enforcer.py
+    # (which only covers 5/1 minutes remaining and never announces a
+    # change at all). last_announced_base/last_announced_bonus_applied
+    # seed silently on first sight per child (so login doesn't announce a
+    # "change" that never happened), then only speak on a genuine later
+    # difference — tracked separately so a change can be correctly
+    # attributed to "the base limit changed" vs "bonus changed" for
+    # picking the right phrasing. budget_warned_thresholds is per-kid,
+    # cleared whenever remaining rises back above all thresholds.
+    last_announced_base: dict = {}  # child -> float
+    last_announced_bonus_applied: dict = {}  # child -> float (capped, not raw)
     budget_warned_thresholds: dict = {}  # child -> set[int]
 
     # Rapid-relogin protection state, all per-kid (dict keyed by child
@@ -997,7 +1111,9 @@ def main() -> None:
     last_locked_while_enforced: dict = {}  # child -> bool, last `locked` seen for them
     blocked_unlock_counted: dict = {}  # child -> bool, matches original's per-instance flag
 
-    mqtt_client = build_mqtt_client(mqtt_config, registry, allowed_state, budget_state)
+    mqtt_client = build_mqtt_client(
+        mqtt_config, registry, allowed_state, budget_state, bonus_state, max_bonus_state
+    )
     logger.info(
         "Connecting to MQTT %s:%s as device '%s'.",
         mqtt_config.mqtt_host,
@@ -1295,37 +1411,58 @@ def main() -> None:
                         )
                     last_published_minutes[active_child] = minutes
 
-                # Budget voice warnings — the FIRST value ever seen for a
-                # kid (this daemon run — last_announced_budget itself is
-                # not persisted) gets the plain "set to" phrasing; any
-                # later change gets increase/decrease-specific phrasing
-                # with the delta, so a kid can tell "my parent gave me
-                # more time" apart from the initial daily limit. Then
+                # Budget/bonus voice warnings — the FIRST value ever seen
+                # for a kid (this daemon run — last_announced_base/
+                # last_announced_bonus_applied aren't persisted) gets the
+                # plain "set to" phrasing; a later BASE change gets
+                # increase/decrease phrasing, a later BONUS change gets
+                # its own distinct phrasing, so a kid can tell "my parent
+                # gave me more time" apart from "I got bonus minutes" and
+                # from the initial daily limit. Then
                 # checks the 15/10/5/1-minutes-remaining thresholds —
                 # `remaining` is now computed from the persisted
                 # UsageState, so it correctly means "minutes actually
                 # used today," not "minutes active since the daemon
                 # process happened to start."
-                current_budget = budget_state.get(active_child)
-                if current_budget is not None:
-                    prev_announced = last_announced_budget.get(active_child)
+                current_base = budget_state.get(active_child)
+                if current_base is not None:
+                    # Effective budget = base + CAPPED bonus — a parent
+                    # typing more bonus than max_bonus_state allows only
+                    # ever actually grants up to the cap, both for
+                    # enforcement/remaining-time math and for what gets
+                    # announced.
+                    current_bonus_raw = bonus_state.get(active_child, 0.0)
+                    current_max_bonus = max_bonus_state.get(
+                        active_child, DEFAULT_MAX_BONUS_MINUTES
+                    )
+                    current_bonus_applied = min(current_bonus_raw, current_max_bonus)
+                    current_effective = current_base + current_bonus_applied
+
+                    prev_base = last_announced_base.get(active_child)
+                    prev_bonus_applied = last_announced_bonus_applied.get(active_child)
                     voice_prefix = registry.topic_prefix_for(active_child)
-                    if prev_announced is None and voice_prefix:
+
+                    if prev_base is None and voice_prefix:
+                        # First sight this run — one plain announcement
+                        # using the full effective total, not just base;
+                        # a kid doesn't need the base/bonus breakdown on
+                        # day one, just "here's your limit today."
                         speak(
                             mqtt_client,
                             voice_prefix,
                             mqtt_config.device_id,
                             BUDGET_INITIAL_VOICE.format(
-                                minutes=_minutes_text(int(current_budget))
+                                minutes=_minutes_text(int(current_effective))
                             ),
                         )
-                        last_announced_budget[active_child] = current_budget
-                    elif (
-                        prev_announced is not None
-                        and current_budget != prev_announced
-                        and voice_prefix
-                    ):
-                        delta = int(current_budget) - int(prev_announced)
+                        last_announced_base[active_child] = current_base
+                        last_announced_bonus_applied[active_child] = current_bonus_applied
+                    elif voice_prefix and current_base != prev_base:
+                        # Base limit changed — takes priority over a bonus
+                        # change landing in the same tick (edge case; if
+                        # both changed at once, the bonus side is still
+                        # recorded below, just not separately announced).
+                        delta = int(current_base) - int(prev_base)
                         template = (
                             BUDGET_INCREASED_VOICE if delta > 0 else BUDGET_DECREASED_VOICE
                         )
@@ -1335,13 +1472,28 @@ def main() -> None:
                             mqtt_config.device_id,
                             template.format(
                                 delta=_minutes_text(abs(delta)),
-                                minutes=_minutes_text(int(current_budget)),
+                                minutes=_minutes_text(int(current_effective)),
                             ),
                         )
-                        last_announced_budget[active_child] = current_budget
-                        budget_warned_thresholds[active_child] = set()  # new budget, fresh thresholds
+                        last_announced_base[active_child] = current_base
+                        last_announced_bonus_applied[active_child] = current_bonus_applied
+                        budget_warned_thresholds[active_child] = set()
+                    elif voice_prefix and current_bonus_applied != prev_bonus_applied:
+                        delta = int(current_bonus_applied) - int(prev_bonus_applied or 0)
+                        template = BONUS_GRANTED_VOICE if delta > 0 else BONUS_REDUCED_VOICE
+                        speak(
+                            mqtt_client,
+                            voice_prefix,
+                            mqtt_config.device_id,
+                            template.format(
+                                delta=_minutes_text(abs(delta)),
+                                minutes=_minutes_text(int(current_effective)),
+                            ),
+                        )
+                        last_announced_bonus_applied[active_child] = current_bonus_applied
+                        budget_warned_thresholds[active_child] = set()
 
-                    remaining = current_budget - usage_states[active_child].minutes_today()
+                    remaining = current_effective - usage_states[active_child].minutes_today()
                     warned = budget_warned_thresholds.setdefault(active_child, set())
                     if remaining > max(BUDGET_WARNING_THRESHOLDS):
                         warned.clear()
