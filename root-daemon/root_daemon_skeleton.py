@@ -396,6 +396,84 @@ def resolve_allowed(
     return elapsed_minutes < fail_grace_minutes
 
 
+def lock_session(uid: int, expected_mac_user: str) -> bool:
+    """
+    Locks the console session belonging to `uid`, from this process
+    (root, no GUI session of its own) — via `launchctl asuser`, the
+    standard mechanism for a privileged process to act inside a specific
+    user's GUI session. Confirmed on real hardware (2026-09-14, against
+    cj's actual session): `pmset displaysleepnow` run this way genuinely
+    locks it — waking requires cj's password — given "require password
+    after sleep" is already a documented hard requirement for every
+    managed account, not new configuration this introduces.
+
+    Deliberately NOT using screentime_enforcer.py's other fallbacks:
+    - CGSession -suspend: the binary doesn't exist at all on macOS 26.6.2
+      Tahoe (confirmed — Apple removed it), so it's not viable here
+      regardless of which process calls it.
+    - The System Events keyboard-shortcut (Ctrl+Cmd+Q via AppleScript):
+      needs Accessibility permission, and it was genuinely unclear
+      whether that's satisfied when invoked via launchctl asuser from
+      root rather than from a process already running inside the kid's
+      own session. pmset needs no such permission, so this sidesteps the
+      question entirely rather than resolving it.
+    - ScreenSaverEngine: same Accessibility-permission uncertainty
+      doesn't apply, but it's a heavier action (launches an app) for the
+      same effect pmset achieves directly; not tested since pmset already
+      worked.
+
+    IMPORTANT — confirmed on real hardware this is NOT actually
+    session-scoped at the hardware level: there's one physical display,
+    so `pmset displaysleepnow` blanks whatever's currently showing,
+    regardless of which uid technically issued it via `launchctl asuser`
+    (that only scopes the command's execution context, not the effect).
+    Caught this for real: with FUS in play, a decision made from a
+    console-user reading up to POLL_INTERVAL_SECONDS old could still fire
+    after the console had already switched away, blanking the WRONG
+    (now-current) session. Mitigated by re-checking get_console_user()
+    immediately before the subprocess call — the tightest window
+    practical, though not a hard guarantee (still a TOCTOU race, just a
+    much smaller one). expected_mac_user is the account this call was
+    decided for; if the console user has changed since, this aborts
+    rather than blanking whoever's actually there now.
+
+    Verified via OUR is_screen_locked() (ioreg/IOConsoleUsers), NOT
+    screentime_enforcer.py's CGSessionCopyCurrentDictionary-based check —
+    we already proved that one doesn't reliably reflect another session's
+    lock state from this process's context.
+    """
+    current = get_console_user()
+    if current != expected_mac_user:
+        logger.warning(
+            "Aborting lock for uid %d: console user changed from '%s' to "
+            "'%s' since this was decided — would have blanked the wrong "
+            "session.",
+            uid,
+            expected_mac_user,
+            current,
+        )
+        return False
+
+    try:
+        subprocess.run(
+            ["/bin/launchctl", "asuser", str(uid), "/usr/bin/pmset", "displaysleepnow"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        logger.exception("Lock command failed for uid %d.", uid)
+        return False
+
+    time.sleep(0.4)  # give it a moment before checking, matches screentime_enforcer.py's own pacing
+    if is_screen_locked():
+        return True
+    logger.warning(
+        "Lock command ran for uid %d but the session doesn't show as locked yet.", uid
+    )
+    return False
+
+
 # New topic — not part of screentime_enforcer.py's scheme, since the
 # per-user agent never needed it (it only ever ran while ITS OWN kid was
 # active; there was no "check another kid's state" concept). This one
@@ -497,6 +575,38 @@ def build_mqtt_client(
             }
             client.publish(
                 discovery_topic, json.dumps(discovery_payload), retain=True, qos=1
+            )
+
+            # Fix for the existing "allowed" switch's discovery config:
+            # screentime_enforcer.py's original definition never sets
+            # "retain": true, so HA's MQTT switch integration doesn't
+            # retain the command it publishes when a PARENT manually
+            # toggles it in the UI (confirmed on the real broker:
+            # screen/cj/allowed's retained value was stale "1" even with
+            # the switch showing off in HA, because the manual toggle was
+            # never retained). Republishing the SAME unique_id/topics
+            # here, with retain added, updates HA's existing entity in
+            # place — no duplicate entity, no change from HA's side.
+            # Existing stale retained values aren't fixed retroactively by
+            # this alone; toggling the switch once after this deploys
+            # will correctly retain going forward.
+            allowed_discovery_topic = f"homeassistant/switch/{base_id}_allowed/config"
+            allowed_discovery_payload = {
+                "name": f"{child} Mac Allowed",
+                "unique_id": f"{base_id}_allowed",
+                "state_topic": allow_topic(prefix),
+                "command_topic": allow_topic(prefix),
+                "payload_on": "1",
+                "payload_off": "0",
+                "retain": True,
+                "icon": "mdi:shield-check",
+                "device": _discovery_device(child, mqtt_config.device_id),
+            }
+            client.publish(
+                allowed_discovery_topic,
+                json.dumps(allowed_discovery_payload),
+                retain=True,
+                qos=1,
             )
 
     def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
@@ -678,31 +788,14 @@ def main() -> None:
                             retain=False,
                             qos=0,
                         )
-                    # This is what actually closes the fast-user-switch
-                    # bypass: check the retained 'allowed' state the
-                    # instant a kid becomes console user, not just when a
-                    # new MQTT message happens to arrive. NOT YET
-                    # enforcing anything — lock/kill isn't ported from
-                    # screentime_enforcer.py yet, so this only logs what
-                    # WOULD happen, so the logic/timing can be validated
-                    # against real allowed-topic state on real hardware
-                    # before it's wired to anything destructive.
-                    is_allowed = resolve_allowed(
-                        should_be_active,
-                        allowed_state,
-                        mqtt_config.fail_mode,
-                        grace_started_at,
-                        mqtt_config.fail_grace_minutes,
-                    )
-                    if not is_allowed:
-                        logger.warning(
-                            "WOULD LOCK '%s' now (allowed=%s, fail_mode=%s) — "
-                            "enforcement not yet wired, this is a dry run.",
-                            should_be_active,
-                            allowed_state.get(should_be_active),
-                            mqtt_config.fail_mode,
-                        )
-                    elif (
+                    # Informational only here — the actual allowed check
+                    # and locking happens in the ENFORCEMENT block below,
+                    # which runs every tick (not just this transition), so
+                    # it also catches a kid re-entering their own password
+                    # after being locked (current_user doesn't change when
+                    # they unlock their own session, so this transition
+                    # block wouldn't see it happen again).
+                    if (
                         mqtt_config.fail_mode == "grace"
                         and allowed_state.get(should_be_active) is None
                     ):
@@ -719,6 +812,42 @@ def main() -> None:
                     # TODO: requirement #9 — publish this device's new
                     # active_child (see PAUSE branch above).
                 active_child = should_be_active
+
+            # ENFORCEMENT — runs every poll tick, not just on the
+            # transition above (mirrors screentime_enforcer.py's
+            # _enforce_if_required, also called every loop tick there).
+            # This is what actually closes the fast-user-switch bypass:
+            # checks the retained 'allowed' state continuously, so a kid
+            # re-entering their own password after being locked gets
+            # re-locked immediately, not just checked once on first
+            # becoming console user.
+            if current_user is not None:
+                enforced_child = registry.child_for(current_user)
+                if enforced_child is not None:
+                    is_allowed = resolve_allowed(
+                        enforced_child,
+                        allowed_state,
+                        mqtt_config.fail_mode,
+                        grace_started_at,
+                        mqtt_config.fail_grace_minutes,
+                    )
+                    if not is_allowed and not locked:
+                        uid = all_sessions.get(current_user)
+                        if uid is None:
+                            logger.error(
+                                "Cannot lock '%s' (%s): no uid found in current "
+                                "session list.",
+                                enforced_child,
+                                current_user,
+                            )
+                        else:
+                            logger.warning(
+                                "Locking '%s' now (allowed=%s, fail_mode=%s).",
+                                enforced_child,
+                                allowed_state.get(enforced_child),
+                                mqtt_config.fail_mode,
+                            )
+                            lock_session(uid, expected_mac_user=current_user)
 
             # Minute accumulation + publish — in-memory only, see main()'s
             # comment above accumulated_seconds for what's NOT yet ported
