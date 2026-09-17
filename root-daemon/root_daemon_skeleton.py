@@ -281,6 +281,11 @@ class DaemonMqttConfig:
         sample_interval_seconds: float,
         fail_mode: str,
         fail_grace_minutes: float,
+        rapid_relogin_shutdown_enabled: bool,
+        rapid_relogin_window_seconds: float,
+        rapid_relogin_max_attempts: int,
+        rapid_relogin_warn_attempt: int,
+        rapid_relogin_warn_voice: bool,
     ) -> None:
         self.device_id = _sanitize_device_id(device_id)
         self.mqtt_host = mqtt_host
@@ -291,6 +296,11 @@ class DaemonMqttConfig:
         self.sample_interval_seconds = sample_interval_seconds
         self.fail_mode = fail_mode
         self.fail_grace_minutes = fail_grace_minutes
+        self.rapid_relogin_shutdown_enabled = rapid_relogin_shutdown_enabled
+        self.rapid_relogin_window_seconds = rapid_relogin_window_seconds
+        self.rapid_relogin_max_attempts = rapid_relogin_max_attempts
+        self.rapid_relogin_warn_attempt = rapid_relogin_warn_attempt
+        self.rapid_relogin_warn_voice = rapid_relogin_warn_voice
 
     @classmethod
     def load(cls, config_path: str) -> "DaemonMqttConfig":
@@ -318,6 +328,18 @@ class DaemonMqttConfig:
             sample_interval_seconds=float(data.get("sample_interval_seconds", 15)),
             fail_mode=fail_mode,
             fail_grace_minutes=float(data.get("root_daemon_fail_grace_minutes", 120)),
+            # Read directly under their original screentime_enforcer.py
+            # names — unlike fail_mode, these are plain numeric/boolean
+            # settings the old agent also reads unmodified; no risk of
+            # breaking its own validation since we never write to this
+            # file, only read it.
+            rapid_relogin_shutdown_enabled=bool(
+                data.get("rapid_relogin_shutdown_enabled", True)
+            ),
+            rapid_relogin_window_seconds=float(data.get("rapid_relogin_window_seconds", 60)),
+            rapid_relogin_max_attempts=int(data.get("rapid_relogin_max_attempts", 4)),
+            rapid_relogin_warn_attempt=int(data.get("rapid_relogin_warn_attempt", 3)),
+            rapid_relogin_warn_voice=bool(data.get("rapid_relogin_warn_voice", True)),
         )
 
 
@@ -472,6 +494,71 @@ def lock_session(uid: int, expected_mac_user: str) -> bool:
         "Lock command ran for uid %d but the session doesn't show as locked yet.", uid
     )
     return False
+
+
+# Only the English rapid-relogin warning phrases are ported for now —
+# screentime_enforcer.py's full multi-language SUPPORTED_LANG_PHRASES
+# table covers login/budget announcements too, which are the separate
+# "voice warnings" work item, explicitly deprioritized below rapid-relogin
+# shutdown escalation. This is scoped to just what the shutdown escalation
+# itself needs.
+RAPID_RELOGIN_WARN_VOICE_ONE = "Warning. One more login attempt will shut down this computer."
+RAPID_RELOGIN_WARN_VOICE_MANY = "Warning. {count} more login attempts will shut down this computer."
+
+
+def speak(text: str) -> None:
+    """
+    Matches screentime_enforcer.py's _speak. `say` plays through the
+    machine's one physical audio output, same as pmset's one physical
+    display — a system-wide effect, not session-scoped, so this needs no
+    launchctl asuser wrapping (same reasoning as lock_session's use of
+    pmset, and shutdown_computer's direct root-level shutdown below).
+    """
+    try:
+        subprocess.run(
+            ["/usr/bin/say", text],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        logger.warning("Failed to play voice alert.", exc_info=True)
+
+
+def shutdown_computer() -> None:
+    """
+    Forces a full system shutdown — the rapid-relogin escalation's last
+    resort when a blocked kid keeps re-entering their password.
+
+    Deliberately simpler than screentime_enforcer.py's _shutdown_computer:
+    that one runs as an unprivileged per-user LaunchAgent, so it has to go
+    through GUI-session mechanisms (osascript telling System Events/Finder
+    to shut down, quitting blocking apps first so they don't cancel it
+    with a "save changes?" dialog, falling back to force-logout) to
+    accomplish something it has no direct permission to do itself. This
+    daemon runs AS ROOT — it can just call `/sbin/shutdown` directly,
+    which forces a shutdown without routing through the normal graceful
+    app-quit sequence at all, sidestepping the "blocking app" problem
+    those GUI-session mechanisms exist to work around. `launchctl reboot
+    halt` as a fallback if that fails for some reason.
+
+    NOT YET verified on real hardware — unlike everything else in this
+    file, this hasn't been tested against the real machine (deliberately:
+    it's destructive and only fires after repeated confirmed rapid-relogin
+    attempts). Confirm the command paths/behavior in a low-stakes way
+    before trusting this in anger.
+    """
+    logger.critical("Rapid relogin threshold reached. Initiating shutdown.")
+    try:
+        subprocess.run(["/sbin/shutdown", "-h", "now"], check=True)
+        return
+    except (subprocess.CalledProcessError, OSError):
+        logger.exception("/sbin/shutdown failed, trying launchctl reboot halt.")
+
+    try:
+        subprocess.run(["/bin/launchctl", "reboot", "halt"], check=True)
+    except (subprocess.CalledProcessError, OSError):
+        logger.exception("launchctl reboot halt also failed. Giving up on shutdown.")
 
 
 # New topic — not part of screentime_enforcer.py's scheme, since the
@@ -657,6 +744,19 @@ def main() -> None:
     allowed_state: dict = {}
     grace_started_at: dict = {}  # per-kid, only used when fail_mode="grace"
 
+    # Rapid-relogin protection state, all per-kid (dict keyed by child
+    # name) — each kid accumulates their own independent streak, matching
+    # the original's per-instance state but generalized since one daemon
+    # now covers every kid instead of one agent per kid. Only actually
+    # evaluated for whichever kid is the CURRENT console user (see
+    # ENFORCEMENT block below) — while backgrounded, `locked` reflects the
+    # console session, not necessarily theirs, so it wouldn't mean
+    # anything for a kid who isn't currently the one being displayed.
+    rapid_relogin_attempts: dict = {}  # child -> list[float] (monotonic timestamps)
+    rapid_relogin_warned_count: dict = {}  # child -> int
+    last_locked_while_enforced: dict = {}  # child -> bool, last `locked` seen for them
+    blocked_unlock_counted: dict = {}  # child -> bool, matches original's per-instance flag
+
     mqtt_client = build_mqtt_client(mqtt_config, registry, allowed_state)
     logger.info(
         "Connecting to MQTT %s:%s as device '%s'.",
@@ -831,7 +931,79 @@ def main() -> None:
                         grace_started_at,
                         mqtt_config.fail_grace_minutes,
                     )
-                    if not is_allowed and not locked:
+                    blocked = not is_allowed
+                    # Tracked on EVERY tick this kid is enforced_child,
+                    # regardless of blocked state — matches
+                    # screentime_enforcer.py's _last_session_locked, which
+                    # also updates unconditionally every loop tick. Read
+                    # BEFORE overwriting below, so it reflects the prior
+                    # tick's state, not this one.
+                    was_locked = last_locked_while_enforced.get(enforced_child)
+                    last_locked_while_enforced[enforced_child] = locked
+
+                    if not blocked:
+                        if rapid_relogin_attempts.get(enforced_child):
+                            logger.info(
+                                "Clearing rapid relogin streak for '%s' after "
+                                "access restored.",
+                                enforced_child,
+                            )
+                        rapid_relogin_attempts[enforced_child] = []
+                        rapid_relogin_warned_count[enforced_child] = 0
+                        blocked_unlock_counted[enforced_child] = False
+                    elif mqtt_config.rapid_relogin_shutdown_enabled:
+                        # Edge-triggered: was locked, now unlocked, while
+                        # blocked = enforced_child just re-entered their own
+                        # password to get back in. Matches
+                        # screentime_enforcer.py's _handle_rapid_relogin_protection
+                        # exactly, just keyed per-kid instead of per-instance.
+                        if locked:
+                            blocked_unlock_counted[enforced_child] = False
+                        elif was_locked and not blocked_unlock_counted.get(
+                            enforced_child, False
+                        ):
+                            now = time.monotonic()
+                            attempts = [
+                                t
+                                for t in rapid_relogin_attempts.get(enforced_child, [])
+                                if now - t < mqtt_config.rapid_relogin_window_seconds
+                            ]
+                            attempts.append(now)
+                            rapid_relogin_attempts[enforced_child] = attempts
+                            attempt_count = len(attempts)
+                            blocked_unlock_counted[enforced_child] = True
+                            logger.warning(
+                                "Rapid relogin attempt detected for '%s' while "
+                                "blocked: %d/%d within %ds.",
+                                enforced_child,
+                                attempt_count,
+                                mqtt_config.rapid_relogin_max_attempts,
+                                mqtt_config.rapid_relogin_window_seconds,
+                            )
+                            warned_count = rapid_relogin_warned_count.get(enforced_child, 0)
+                            if (
+                                mqtt_config.rapid_relogin_warn_voice
+                                and attempt_count >= mqtt_config.rapid_relogin_warn_attempt
+                                and warned_count < mqtt_config.rapid_relogin_warn_attempt
+                            ):
+                                remaining_attempts = max(
+                                    0,
+                                    mqtt_config.rapid_relogin_max_attempts - attempt_count,
+                                )
+                                if remaining_attempts > 0:
+                                    if remaining_attempts == 1:
+                                        speak(RAPID_RELOGIN_WARN_VOICE_ONE)
+                                    else:
+                                        speak(
+                                            RAPID_RELOGIN_WARN_VOICE_MANY.format(
+                                                count=remaining_attempts
+                                            )
+                                        )
+                                rapid_relogin_warned_count[enforced_child] = attempt_count
+                            if attempt_count >= mqtt_config.rapid_relogin_max_attempts:
+                                shutdown_computer()
+
+                    if blocked and not locked:
                         uid = all_sessions.get(current_user)
                         if uid is None:
                             logger.error(
