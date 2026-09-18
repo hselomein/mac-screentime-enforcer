@@ -1,9 +1,13 @@
 blueprint:
-  name: Kid Mac Daily Reset
+  name: Kid Mac Daily Reset (all kids)
   description: >-
-    Resets one managed kid's Mac screen-time state each morning:
-    re-allows access, clears Parent Override, and zeroes out Bonus
-    Minutes.
+    Resets every managed kid's Mac screen-time state each morning in ONE
+    automation: re-allows access, clears Parent Override, and zeroes out
+    Bonus Minutes for each of them. This one is a single reset action
+    applied identically to a list of entities, not per-kid conditional
+    logic like the budget-enforcement blueprint — so unlike that one,
+    you don't need a separate automation instance per kid. Import once,
+    pick all your kids' entities in the three lists below, done.
 
     Deliberately does NOT touch the daily budget number itself — that's
     either left as a standing value you set once, or driven by a
@@ -12,55 +16,62 @@ blueprint:
     also left untouched here, since it's a standing policy setting, not
     a daily one — only the bonus actually GRANTED resets, not the cap on
     how much can ever apply.
-
-    Import once, then create one automation per managed kid from it.
   domain: automation
+  source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_daily_reset.yaml
   input:
     reset_time:
       name: Reset Time
-      description: What time to run the daily reset.
+      description: What time to run the daily reset, for every kid at once.
       default: "03:00:00"
       selector:
         time: {}
-    allowed_switch:
-      name: Allowed Switch
-      description: The kid's allowed switch (e.g. switch.cj_mac_cj_mac_allowed).
+    allowed_switches:
+      name: Allowed Switches
+      description: >-
+        Every managed kid's allowed switch (HA name "<child> Mac
+        Allowed", likely switch.cj_mac_allowed — check each kid's Mac
+        device page under Settings → Devices & Services → MQTT for the
+        exact entity_id). Pick all of them here, not just one.
       selector:
         entity:
           domain: switch
-    parent_override_switch:
-      name: Parent Override Switch
+          multiple: true
+    parent_override_switches:
+      name: Parent Override Switches
       description: >-
-        The kid's parent override switch (e.g.
-        switch.cj_mac_cj_mac_parent_override).
+        Every managed kid's parent override switch (HA name "<child>
+        Mac Parent Override", likely switch.cj_mac_parent_override).
       selector:
         entity:
           domain: switch
-    bonus_minutes_entity:
-      name: Bonus Minutes Number
+          multiple: true
+    bonus_minutes_entities:
+      name: Bonus Minutes Numbers
       description: >-
-        The kid's bonus minutes number entity (e.g.
-        number.cj_mac_cj_mac_bonus_minutes) — reset to 0 here. Do NOT
-        point this at Max Bonus Minutes; that one's a standing cap, not
-        a daily value.
+        Every managed kid's bonus minutes number entity (HA name
+        "<child> Mac Bonus Minutes", likely number.cj_mac_bonus_minutes)
+        — each one reset to 0 here. Do NOT include any Max Bonus Minutes
+        entity in this list; that one's a standing cap, not a daily
+        value, and this blueprint never touches it.
       selector:
         entity:
           domain: number
+          multiple: true
 
-triggers:
-  - trigger: time
+trigger:
+  - platform: time
     at: !input reset_time
 
-actions:
-  - action: switch.turn_on
+action:
+  - service: switch.turn_on
     target:
-      entity_id: !input allowed_switch
-  - action: switch.turn_off
+      entity_id: !input allowed_switches
+  - service: switch.turn_off
     target:
-      entity_id: !input parent_override_switch
-  - action: number.set_value
+      entity_id: !input parent_override_switches
+  - service: number.set_value
     target:
-      entity_id: !input bonus_minutes_entity
+      entity_id: !input bonus_minutes_entities
     data:
       value: 0
 

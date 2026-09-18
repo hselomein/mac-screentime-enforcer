@@ -16,29 +16,34 @@ blueprint:
     from it, pointing the four inputs at that kid's own entities/topic —
     no need to hand-edit a copy of the YAML per kid.
   domain: automation
-  source_url: null
+  source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
   input:
     minutes_sensor:
       name: Minutes Sensor
-      description: The kid's Mac minutes-today sensor (e.g. sensor.cj_mac_cj_mac_minutes).
+      description: >-
+        The kid's Mac minutes sensor (HA name "<child> Mac Minutes",
+        so likely something like sensor.cj_mac_minutes — check
+        Settings → Devices & Services → MQTT → the kid's Mac device for
+        the exact entity_id, since HA's exact naming can vary).
       selector:
         entity:
           domain: sensor
     daily_budget_entity:
       name: Daily Budget Number
       description: >-
-        The kid's daily budget (minutes) number entity (e.g.
-        number.cj_mac_cj_mac_daily_budget_min).
+        The kid's daily budget (minutes) number entity (HA name "<child>
+        Mac Daily Budget (min)", likely number.cj_mac_daily_budget_min —
+        check the kid's Mac device page for the exact entity_id).
       selector:
         entity:
           domain: number
     parent_override_switch:
       name: Parent Override Switch
       description: >-
-        The kid's parent override switch (e.g.
-        switch.cj_mac_cj_mac_parent_override) — while on, this automation
-        does nothing, letting a parent hold `allowed` at whatever they've
-        manually set regardless of minutes/budget.
+        The kid's parent override switch (HA name "<child> Mac Parent
+        Override", likely switch.cj_mac_parent_override) — while on, this
+        automation does nothing, letting a parent hold `allowed` at
+        whatever they've manually set regardless of minutes/budget.
       selector:
         entity:
           domain: switch
@@ -50,27 +55,27 @@ blueprint:
       selector:
         text: {}
 
-triggers:
-  - entity_id: !input minutes_sensor
-    trigger: state
-  - entity_id: !input daily_budget_entity
-    trigger: state
+trigger:
+  - platform: state
+    entity_id: !input minutes_sensor
+  - platform: state
+    entity_id: !input daily_budget_entity
 
-conditions:
+condition:
   - condition: not
     conditions:
       - condition: state
         entity_id: !input parent_override_switch
         state: "on"
 
-actions:
+action:
   - choose:
       - conditions:
           - condition: numeric_state
             entity_id: !input minutes_sensor
             above: !input daily_budget_entity
         sequence:
-          - action: mqtt.publish
+          - service: mqtt.publish
             data:
               topic: !input allowed_topic
               qos: 1
@@ -81,7 +86,7 @@ actions:
             entity_id: !input minutes_sensor
             below: !input daily_budget_entity
         sequence:
-          - action: mqtt.publish
+          - service: mqtt.publish
             data:
               topic: !input allowed_topic
               qos: 1

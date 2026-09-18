@@ -1,16 +1,138 @@
-# Example Mosquitto ACLs for the macOS Screen Time agent
-# Assumes broker uses a dedicated MQTT user for the agent (here: "kiddo").
-# This user can publish telemetry for their namespace and read the retained allow flag,
-# but cannot change allow/deny or touch any other child's topics.
+# Example Mosquitto ACLs for this project.
+#
+# This file was stale relative to the actual topic scheme for a while —
+# it only covered `screen/<child>/mac/#` and `screen/<child>/allowed`,
+# and never granted anything under `homeassistant/...` at all. In
+# reality both screentime_enforcer.py and root-daemon/root_daemon_skeleton.py
+# also need to PUBLISH MQTT discovery configs there, and to READ the
+# daily_budget / bonus_minutes / max_bonus_minutes number state topics
+# (also under `homeassistant/`), which live in these same processes'
+# HA-managed number/switch entities. An agent restricted to only the
+# rules that used to be here would connect, but its discovery configs
+# would be silently rejected by the broker — it would look "working" (no
+# crash) while creating none of its HA entities.
+#
+# WRITE deliberately NOT granted on daily_budget/bonus_minutes/
+# max_bonus_minutes: checked every actual `.publish()` call in both
+# scripts — neither one ever writes to these, only subscribes to read a
+# parent's changes; HA is the sole legitimate writer. A leaked credential
+# with write access there could set its own budget/bonus directly and
+# bypass enforcement just as effectively as flipping `allowed` (which
+# IS correctly read-only below) — so this ACL only grants what's
+# actually used, not the broader `readwrite` an earlier version of this
+# file had on that whole subtree.
+#
+# IMPORTANT WILDCARD LIMITATION, worth understanding before editing this:
+# discovery CONFIG topics look like `homeassistant/<domain>/<child>_<device_id>_mac_<field>/config`
+# — child, device_id, and the field name are all concatenated into ONE
+# topic level (no slashes between them), not separate levels. MQTT's `+`
+# wildcard only matches a WHOLE topic level, so there is no clean pattern
+# that means "any field, but only for this specific child+device" — you
+# either list every exact discovery topic (correct but has to be updated
+# any time an entity is added — same staleness risk that made the old
+# version of this file wrong) or scope this credential's discovery
+# access more broadly. This file takes the second option below, since
+# for a home broker (not multi-tenant) that's a reasonable trade — the
+# tight, per-exact-topic list is included further down as a commented
+# alternative if you want it.
+#
+# NO EXPLICIT "DENY ALL" LINE, ON PURPOSE: Mosquitto's ACL format has no
+# deny verb — every `topic`/`pattern` line is an additive grant, and once
+# acl_file is in use, anything not explicitly granted to the connecting
+# user is already denied by default. An earlier version of this file (and
+# this project's own example) had `pattern write $` / `pattern read $`
+# "for clarity" — `$` isn't a real Mosquitto substitution token (that's
+# `%u`/`%c`), so those lines were inert no-ops, not an actual deny. Removed
+# rather than kept as misleading decoration.
+#
+# --- Recommended: one MQTT user per MACHINE, not per kid -------------
+# The root daemon (root-daemon/) manages every kid who might use a given
+# Mac from ONE process with ONE set of credentials — see
+# config/CONFIG_REFERENCE.md's note on mqtt_username/mqtt_password for
+# why. Name that user after the MACHINE, not a kid (screentime_<device_id>,
+# matching this Mac's own sanitized device_id) — naming it after one kid
+# just because they happened to be first invites exactly the confusion
+# it caused here: it looks kid-scoped, but it's shared by everyone this
+# machine manages. Repeat the `screen/...` and `homeassistant/<base_id>/...`
+# blocks below once per kid this specific machine's config.json lists in
+# managed_users.
 
-user kiddo
-# Allow publishing telemetry/status for this child/device
-# minutes_today, active, status, etc.
-topic write screen/kiddo/mac/#
+user screentime_macbookprom1
 
-# Allow reading the retained allowed flag only
-topic read screen/kiddo/allowed
+# --- cj on this machine ---
+# Telemetry + commands scoped to this kid on this specific device:
+# minutes_today, active, status, availability, voice_command,
+# session_state all live under here (agent publishes all of these; the
+# voice helper — same credential, per-machine model — subscribes to
+# voice_command specifically, hence readwrite rather than write-only).
+topic readwrite screen/cj/mac/macbookprom1/#
+# The parent's allow/deny command (agent subscribes, never publishes here).
+topic read screen/cj/allowed
+# daily_budget / bonus_minutes / max_bonus_minutes — read only, see the
+# note above on why write is deliberately not granted here. `+` cleanly
+# matches the field-name level (daily_budget, bonus_minutes, etc.) since
+# it's a single level with no slashes in it, unlike the discovery config
+# topics below.
+topic read homeassistant/cj_macbookprom1_mac/+/state
+# parent_override — old agent (screentime_enforcer.py) ONLY, not the
+# root daemon (root_daemon_skeleton.py never reads or writes this at
+# all — override is purely an HA/automation-side concept). The old agent
+# writes exactly once, a default "OFF" at first discovery, and never
+# reads it back — but readwrite (not write-only) is still simplest here
+# since it's the same one-topic-many-fields shape as the read grant
+# above. Comment this out if this machine only ever runs the root daemon.
+topic readwrite homeassistant/cj_macbookprom1_mac/override/state
 
-# (Optional) deny everything else explicitly
-pattern write $
-pattern read $
+# --- aaron on this machine ---
+topic readwrite screen/aaron/mac/macbookprom1/#
+topic read screen/aaron/allowed
+topic read homeassistant/aaron_macbookprom1_mac/+/state
+topic readwrite homeassistant/aaron_macbookprom1_mac/override/state
+
+# --- alenna on this machine ---
+topic readwrite screen/alenna/mac/macbookprom1/#
+topic read screen/alenna/allowed
+topic read homeassistant/alenna_macbookprom1_mac/+/state
+topic readwrite homeassistant/alenna_macbookprom1_mac/override/state
+
+# --- athena on this machine ---
+topic readwrite screen/athena/mac/macbookprom1/#
+topic read screen/athena/allowed
+topic read homeassistant/athena_macbookprom1_mac/+/state
+topic readwrite homeassistant/athena_macbookprom1_mac/override/state
+
+# Discovery CONFIG topics (see the wildcard limitation note above) —
+# broad on purpose, home-broker trade-off:
+topic write homeassistant/+/+/config
+# Tighter but higher-maintenance alternative, if you'd rather list every
+# exact topic instead of the wildcard above (update this any time a new
+# entity type is added — see the discovery lists in screentime_enforcer.py
+# and root_daemon_skeleton.py for the current full set):
+#   topic write homeassistant/binary_sensor/cj_macbookprom1_mac_online/config
+#   topic write homeassistant/sensor/cj_macbookprom1_mac_minutes/config
+#   topic write homeassistant/binary_sensor/cj_macbookprom1_mac_active/config
+#   topic write homeassistant/switch/cj_macbookprom1_mac_allowed/config
+#   topic write homeassistant/number/cj_macbookprom1_mac_daily_budget_minutes/config
+#   topic write homeassistant/switch/cj_macbookprom1_mac_parent_override/config
+#   topic write homeassistant/sensor/cj_macbookprom1_mac_session_state/config
+#   topic write homeassistant/number/cj_macbookprom1_mac_bonus_minutes/config
+#   topic write homeassistant/number/cj_macbookprom1_mac_max_bonus_minutes/config
+#   (repeat per kid)
+
+# --- Legacy alternative: one MQTT user per CHILD (old agent only) ----
+# Still valid if you're running screentime_enforcer.py with a genuinely
+# separate broker credential per kid instead of the shared per-machine
+# one above (config.json only ever has one mqtt_username either way —
+# this just means using a DIFFERENT config.json, and so a different
+# credential, per machine-that-manages-only-that-kid). Naming these after
+# the kid IS correct here, unlike the shared-machine user above, since
+# each one really is scoped to just that one kid. Doesn't apply to the
+# root daemon, which expects one credential to cover every kid
+# managed_users lists for that machine.
+#
+# user screentime_kiddo
+# topic write screen/kiddo/mac/#
+# topic read screen/kiddo/allowed
+# topic read homeassistant/kiddo_mac-mini_mac/+/state
+# topic readwrite homeassistant/kiddo_mac-mini_mac/override/state
+# topic write homeassistant/+/+/config

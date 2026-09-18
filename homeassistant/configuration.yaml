@@ -1,84 +1,37 @@
-# Home Assistant package example for two children
-# Replace child_id/device_id/topic_prefix values with your own. Keep the /mac tier so each device type stays isolated.
-
-mqtt:
-  sensor:
-    - name: "Kiddo Mac Minutes Today"
-      unique_id: kiddo_mac_minutes_today
-      state_topic: "screen/kiddo/mac/mac-mini/minutes_today"
-      unit_of_measurement: "min"
-      qos: 1
-      icon: mdi:clock-time-ten-outline
-  binary_sensor:
-    - name: "Kiddo Mac Active"
-      unique_id: kiddo_mac_active
-      state_topic: "screen/kiddo/mac/mac-mini/active"
-      payload_on: "1"
-      payload_off: "0"
-      device_class: running
-      icon: mdi:clock-time-ten-outline
-
-input_number:
-  kiddo_mac_daily_budget_minutes:
-    name: "Kiddo Mac Daily Budget (min)"
-    min: 30
-    max: 600
-    step: 15
-    unit_of_measurement: min
-    icon: mdi:timer
-
-input_boolean:
-  kiddo_mac_parent_override:
-    name: "Kiddo Mac Parent Override"
-    icon: mdi:shield-check
-
-automation:
-  - alias: "Kiddo Mac Budget Enforcement"
-    description: "Publishes allowed based on minutes vs budget (skips when parent override is on)."
-    trigger:
-      - platform: state
-        entity_id: sensor.kiddo_mac_minutes_today
-    condition:
-      - condition: not
-        conditions:
-          - condition: state
-            entity_id: input_boolean.kiddo_mac_parent_override
-            state: "on"
-    action:
-      - choose:
-          - conditions:
-              - condition: numeric_state
-                entity_id: sensor.kiddo_mac_minutes_today
-                above: input_number.kiddo_mac_daily_budget_minutes
-            sequence:
-              - service: mqtt.publish
-                data:
-                  topic: "screen/kiddo/allowed"
-                  qos: 1
-                  retain: true
-                  payload: "0"
-          - conditions:
-              - condition: numeric_state
-                entity_id: sensor.kiddo_mac_minutes_today
-                below: input_number.kiddo_mac_daily_budget_minutes
-            sequence:
-              - service: mqtt.publish
-                data:
-                  topic: "screen/kiddo/allowed"
-                  qos: 1
-                  retain: true
-                  payload: "1"
-    mode: single
-
-  - alias: "Kiddo Mac Override"
-    trigger:
-      - platform: state
-        entity_id: input_boolean.kiddo_mac_parent_override
-    action:
-      - service: mqtt.publish
-        data:
-          topic: "screen/kiddo/allowed"
-          qos: 1
-          retain: true
-          payload: >-
-            {{ "1" if is_state('input_boolean.kiddo_mac_parent_override', 'on') else "0" }}
+# Home Assistant notes for this project.
+#
+# There is deliberately no mqtt:/input_number:/input_boolean: YAML below
+# (an earlier version of this file had one). As of MQTT discovery being
+# wired in, both screentime_enforcer.py and root-daemon/root_daemon_skeleton.py
+# publish their own discovery configs for every entity a managed kid
+# needs, the moment they connect:
+#
+#   <child> Mac Minutes            sensor            e.g. sensor.kiddo_mac_minutes
+#   <child> Mac Active              binary_sensor     e.g. binary_sensor.kiddo_mac_active
+#   <child> Mac Allowed              switch (parent-settable)   e.g. switch.kiddo_mac_allowed
+#   <child> Mac Daily Budget (min)   number (parent-settable)   e.g. number.kiddo_mac_daily_budget_min
+#   <child> Mac Parent Override      switch (parent-settable)   e.g. switch.kiddo_mac_parent_override
+#   <child> Mac Session State        sensor — root daemon only   active/locked/backgrounded/offline
+#   <child> Mac Bonus Minutes        number (parent-settable) — root daemon only
+#   <child> Mac Max Bonus Minutes    number (parent-settable) — root daemon only
+#
+# These all appear automatically under Settings -> Devices & Services ->
+# MQTT once the agent/daemon is running and connected. Defining your own
+# versions of them here (input_number, input_boolean, or a manual mqtt:
+# sensor:/binary_sensor: block) creates a SEPARATE set of entities that
+# looks similar but that the agent/daemon never reads from or writes to
+# — editing them does nothing. Exact entity_ids can vary slightly by HA
+# version; confirm the real ones on each kid's Mac device page rather
+# than assuming the examples above are exact.
+#
+# The only thing you actually add by hand is the automations that DRIVE
+# `allowed` from those entities. Don't hand-write these either — import
+# the blueprints from ../homeassistant/blueprints/ instead:
+#   - kid_mac_budget_enforcement.yaml — one automation PER managed kid
+#     (compares that kid's own minutes against their own budget).
+#   - kid_mac_daily_reset.yaml — ONE automation total, covering every
+#     managed kid at once (just resets values, no per-kid logic needed).
+#
+# See the main README's "Home Assistant integration" section for the
+# full walkthrough, and config/CONFIG_REFERENCE.md for what every
+# config.json field on the Mac side actually does.
