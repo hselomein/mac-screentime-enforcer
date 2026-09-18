@@ -46,11 +46,27 @@ build_config_interactive() {
     echo "Press enter to accept the default value." >&2
     read -r -p "Child name (for MQTT topics, e.g., kiddo): " CHILD_NAME
     CHILD_NAME=${CHILD_NAME:-kiddo}
-    read -r -p "Device ID [auto]: " DEVICE_ID
-    if [[ -z "$DEVICE_ID" ]]; then
-        DEVICE_ID=$(hostname -s | tr '[:upper:] ' '[:lower:]-' | tr -cd '[:alnum:]-_')
-        DEVICE_ID=${DEVICE_ID:-mac}
+    # Hostname alone isn't safe to suggest blindly: macOS's own
+    # de-duplication (" (2)", " (3)" on a computer name) only reliably
+    # fires when both Macs were actually on the same network during each
+    # other's setup — two Macs set up separately can end up with the same
+    # name and nothing catches it. A short hardware-serial suffix makes
+    # the default safe to just accept even then.
+    HOSTNAME_SLUG=$(hostname -s | tr '[:upper:] ' '[:lower:]-' | tr -cd '[:alnum:]-_')
+    HOSTNAME_SLUG=${HOSTNAME_SLUG:-mac}
+    SERIAL_SUFFIX=$(
+        ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null \
+            | awk -F'"' '/IOPlatformSerialNumber/{print $4}' \
+            | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]' | tail -c 4
+    )
+    if [[ -n "$SERIAL_SUFFIX" ]]; then
+        SUGGESTED_DEVICE_ID="${HOSTNAME_SLUG}-${SERIAL_SUFFIX}"
+    else
+        SUGGESTED_DEVICE_ID="$HOSTNAME_SLUG"
     fi
+    read -r -p "Device ID [$SUGGESTED_DEVICE_ID]: " DEVICE_ID
+    DEVICE_ID=${DEVICE_ID:-$SUGGESTED_DEVICE_ID}
+    read -r -p "Friendly name for Home Assistant (optional, e.g. \"cj's MacBook Pro\" — tells this Mac apart from others the same kid uses): " FRIENDLY_NAME
     read -r -p "MQTT host (hostname/IP): " MQTT_HOST
     MQTT_HOST=${MQTT_HOST:-mqtt.local}
     read -r -p "MQTT port [1883]: " MQTT_PORT
@@ -84,6 +100,7 @@ build_config_interactive() {
     cat >"$TMP_CONFIG" <<EOF
 {
   "device_id": "$DEVICE_ID",
+  "device_friendly_name": "$FRIENDLY_NAME",
   "mqtt_host": "$MQTT_HOST",
   "mqtt_port": $MQTT_PORT,
   "mqtt_username": "$MQTT_USER",
@@ -96,8 +113,8 @@ build_config_interactive() {
   "offline_grace_period_seconds": 180,
   "managed_users": $MANAGED_JSON,
   "state_path": "~/Library/Application Support/ha-screen-agent/state.json",
-  "log_file": "/tmp/ha_screen_agent.out.log",
-  "err_log_file": "/tmp/ha_screen_agent.err.log",
+  "log_file": "~/Library/Logs/ha-screen-agent/agent.out.log",
+  "err_log_file": "~/Library/Logs/ha-screen-agent/agent.err.log",
   "debug_mqtt": false,
   "track_active_app": $TRACK_ACTIVE_APP
 }
@@ -201,10 +218,20 @@ cat > "$PLIST_PATH" <<EOF
         <key>SuccessfulExit</key>
         <false/>
     </dict>
+    <!--
+    Deliberately /dev/null, not a real path: this ONE plist file gets
+    bootstrapped into every managed kid's own GUI session (launchctl
+    bootstrap gui/<uid>), so a literal path here would be shared/clobbered
+    across every kid it's loaded for, and can't use ~ (launchd doesn't
+    expand it). The agent configures its own per-user, ~-expanded log
+    files via log_file/err_log_file in config.json instead (see
+    _setup_logging in screentime_enforcer.py) — this only discards the
+    rare raw print/traceback that happens before that logging is set up.
+    -->
     <key>StandardOutPath</key>
-    <string>/tmp/ha_screen_agent.out.log</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/ha_screen_agent.err.log</string>
+    <string>/dev/null</string>
     <key>LimitLoadToSessionType</key>
     <array>
         <string>Aqua</string>
