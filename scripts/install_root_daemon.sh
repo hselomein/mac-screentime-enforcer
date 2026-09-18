@@ -629,25 +629,48 @@ fi
 BUDGET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
 RESET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_daily_reset.yaml"
 
-echo ""
-echo "HA blueprints for this setup live at:"
-echo "  $BUDGET_BLUEPRINT"
-echo "  $RESET_BLUEPRINT"
-echo "Import both in HA under Settings > Automations > Blueprints > Import"
-echo "Blueprint. Budget enforcement needs one automation PER managed kid"
-echo "(different entities/comparison per kid); daily reset needs only ONE"
-echo "automation total, listing every kid's entities in its 3 inputs."
+# HA's Import Blueprint dialog only accepts a URL, not pasted YAML — so
+# the useful thing to hand back here is a ready-to-paste raw GitHub URL,
+# not the file contents. Derived from this checkout's own git remote so
+# it's correct for whoever's actually running this (their own fork),
+# not hardcoded to one specific repo.
+REMOTE_URL="$(git -C "$PROJECT_DIR" config --get remote.origin.url 2>/dev/null || true)"
+CURRENT_BRANCH="$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+CURRENT_BRANCH=${CURRENT_BRANCH:-main}
+RAW_BASE=""
+case "$REMOTE_URL" in
+    https://github.com/*.git)
+        REPO_PATH="${REMOTE_URL#https://github.com/}"
+        RAW_BASE="https://raw.githubusercontent.com/${REPO_PATH%.git}/${CURRENT_BRANCH}"
+        ;;
+    git@github.com:*.git)
+        REPO_PATH="${REMOTE_URL#git@github.com:}"
+        RAW_BASE="https://raw.githubusercontent.com/${REPO_PATH%.git}/${CURRENT_BRANCH}"
+        ;;
+esac
 
-if [[ -t 0 ]]; then
-    SHOW_BLUEPRINTS=$(prompt_boolean "Print both blueprint YAML files now for copy/paste?" "n")
-    if [[ "$SHOW_BLUEPRINTS" == "true" ]]; then
-        echo ""
-        echo "===== kid_mac_budget_enforcement.yaml ====="
-        cat "$BUDGET_BLUEPRINT"
-        echo ""
-        echo "===== kid_mac_daily_reset.yaml ====="
-        cat "$RESET_BLUEPRINT"
-    fi
+echo ""
+echo "Import both blueprints in HA: Settings > Automations & Scenes >"
+echo "Blueprints > Import Blueprint. Budget enforcement needs one"
+echo "automation PER managed kid (different entities/comparison per kid);"
+echo "daily reset needs only ONE automation total, listing every kid's"
+echo "entities in its 3 inputs."
+echo ""
+if [[ -n "$RAW_BASE" ]]; then
+    echo "Paste these URLs into the Import Blueprint dialog (requires this"
+    echo "repo to be public on GitHub):"
+    echo "  Budget enforcement: ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
+    echo "  Daily reset:        ${RAW_BASE}/homeassistant/blueprints/kid_mac_daily_reset.yaml"
+    echo ""
+    echo "If this repo is private instead, skip the URL import and place the"
+    echo "files directly under <HA config>/blueprints/automation/ — see README."
+else
+    echo "Couldn't determine a GitHub URL for this checkout. Either push this"
+    echo "repo to a public GitHub repo and use Import Blueprint with its raw"
+    echo "URL, or place these files directly on the HA filesystem instead:"
+    echo "  $BUDGET_BLUEPRINT"
+    echo "  $RESET_BLUEPRINT"
+    echo "under <HA config>/blueprints/automation/ — see README for details."
 fi
 
 cat <<EOF

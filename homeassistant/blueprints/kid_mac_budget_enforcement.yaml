@@ -18,6 +18,18 @@ blueprint:
   domain: automation
   source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
   input:
+    automation_name:
+      name: Automation Name
+      description: >-
+        Since you create one instance of this blueprint PER kid, they'd
+        otherwise all show up in HA with the exact same generic name
+        ("Kid Mac Budget Enforcement") with nothing to tell them apart
+        in the automations list. Change this per kid (e.g. "Kid Mac
+        Budget Enforcement — aaron") — still editable later like any
+        automation's name.
+      default: "Kid Mac Budget Enforcement"
+      selector:
+        text: {}
     minutes_sensor:
       name: Minutes Sensor
       description: >-
@@ -54,6 +66,8 @@ blueprint:
         topic_prefix in config.json (e.g. screen/cj/allowed).
       selector:
         text: {}
+
+alias: !input automation_name
 
 trigger:
   - platform: state
