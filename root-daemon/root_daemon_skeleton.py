@@ -811,6 +811,18 @@ def session_state_topic(topic_prefix: str, device_id: str) -> str:
     return f"{topic_prefix}/mac/{device_id}/session_state"
 
 
+# Matches screentime_enforcer.py's override_state_topic exactly (same
+# f"homeassistant/{base_id}/override/state" shape as daily_budget/
+# bonus_minutes/max_bonus_minutes above) — this daemon never reads it
+# back (parent_override is checked in the HA automation blueprint, not
+# here, same as the original agent), it only needs to publish discovery
+# so the entity exists at all. Without this, a from-scratch install (no
+# history of the old agent ever having published it) has no Parent
+# Override switch for the blueprint to point at.
+def override_state_topic(child: str, device_id: str) -> str:
+    return f"homeassistant/{child}_{device_id}_mac/override/state"
+
+
 ROOT_DAEMON_VERSION = "0.1.0-skeleton"
 
 
@@ -1041,6 +1053,110 @@ def build_mqtt_client(
             client.publish(
                 max_bonus_discovery_topic,
                 json.dumps(max_bonus_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
+            # The four entities below match screentime_enforcer.py's own
+            # discovery exactly (same names/unique_ids/topics) — on a
+            # MACHINE THAT MIGRATED from the old agent, these already
+            # exist from its own past discovery publishes, so this daemon
+            # never needed to re-publish them itself. That assumption
+            # breaks completely on a from-scratch install with no such
+            # history (confirmed on real hardware: a fresh install showed
+            # only the 5 entities above — no minutes, no active, no
+            # parent_override at all, since nothing had ever published
+            # discovery for them under this device_id). Publishing them
+            # here too makes the root daemon fully self-sufficient
+            # without requiring the old agent to have ever run first.
+            online_discovery_topic = f"homeassistant/binary_sensor/{base_id}_online/config"
+            online_discovery_payload = {
+                "name": f"{child} Mac Agent Online",
+                "unique_id": f"{base_id}_online",
+                "state_topic": availability_topic(prefix, mqtt_config.device_id),
+                "payload_on": "online",
+                "payload_off": "offline",
+                "device_class": "connectivity",
+                "icon": "mdi:lan-connect",
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
+            }
+            client.publish(
+                online_discovery_topic,
+                json.dumps(online_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
+            minutes_discovery_topic = f"homeassistant/sensor/{base_id}_minutes/config"
+            minutes_discovery_payload = {
+                "name": f"{child} Mac Minutes",
+                "unique_id": f"{base_id}_minutes",
+                "state_topic": minutes_topic(prefix, mqtt_config.device_id),
+                "device_class": "duration",
+                "state_class": "total_increasing",
+                "unit_of_measurement": "min",
+                "icon": "mdi:timer-outline",
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
+            }
+            client.publish(
+                minutes_discovery_topic,
+                json.dumps(minutes_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
+            active_discovery_topic = f"homeassistant/binary_sensor/{base_id}_active/config"
+            active_discovery_payload = {
+                "name": f"{child} Mac Active",
+                "unique_id": f"{base_id}_active",
+                "state_topic": active_topic(prefix, mqtt_config.device_id),
+                "payload_on": "1",
+                "payload_off": "0",
+                "device_class": "running",
+                "icon": "mdi:laptop",
+                "availability_topic": availability_topic(prefix, mqtt_config.device_id),
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
+            }
+            client.publish(
+                active_discovery_topic,
+                json.dumps(active_discovery_payload),
+                retain=True,
+                qos=1,
+            )
+
+            # No initial-value publish here, unlike the original agent's
+            # one-time "OFF" default: that only ran once per process
+            # lifetime (guarded by _discovery_published), but this whole
+            # block runs on EVERY connect/reconnect with no such guard —
+            # publishing a default here unconditionally would reset a
+            # parent's real override choice back to OFF on every
+            # reconnect (a network blip, not just a restart). Leaving it
+            # unset is safe: HA shows it as unknown until first toggled,
+            # and the blueprint's `state: "on"` check is false either way.
+            override_discovery_topic = f"homeassistant/switch/{base_id}_parent_override/config"
+            override_discovery_payload = {
+                "name": f"{child} Mac Parent Override",
+                "unique_id": f"{base_id}_parent_override",
+                "state_topic": override_state_topic(child, mqtt_config.device_id),
+                "command_topic": override_state_topic(child, mqtt_config.device_id),
+                "payload_on": "ON",
+                "payload_off": "OFF",
+                "icon": "mdi:shield-star",
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
+            }
+            client.publish(
+                override_discovery_topic,
+                json.dumps(override_discovery_payload),
                 retain=True,
                 qos=1,
             )
