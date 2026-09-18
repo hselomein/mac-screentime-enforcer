@@ -44,8 +44,13 @@ DEFAULT_CONFIG_PATH = "/Library/Application Support/ha-screen-agent/config.json"
 DEFAULT_STATE_PATH = (
     Path.home() / "Library" / "Application Support" / "ha-screen-agent" / "state.json"
 )
-DEFAULT_LOG_PATH = "/tmp/ha_screen_agent.out.log"
-DEFAULT_ERR_LOG_PATH = "/tmp/ha_screen_agent.err.log"
+# NOT /tmp: macOS clears /tmp on every reboot, which is exactly when a
+# crash log is most needed. ~/Library/Logs is the standard per-user
+# location, survives reboots, and this process already runs as the child
+# user (a LaunchAgent in their own session), so it's always writable —
+# unlike /var/log, which is root:wheel and not writable by a regular user.
+DEFAULT_LOG_PATH = "~/Library/Logs/ha-screen-agent/agent.out.log"
+DEFAULT_ERR_LOG_PATH = "~/Library/Logs/ha-screen-agent/agent.err.log"
 
 
 SUPPORTED_LANG_PHRASES = {
@@ -279,6 +284,10 @@ class AgentConfig:
     debug_mqtt: bool = False
     track_active_app: bool = False
     managed_user: Optional[str] = None
+    # Purely cosmetic — shown in HA's device name so a parent can tell
+    # this Mac apart from others the same kid uses (device_id itself is
+    # a stable topic-building identifier, not meant to be a nice label).
+    device_friendly_name: Optional[str] = None
 
     @classmethod
     def load(cls, path: Path, session_user: Optional[str] = None) -> Optional["AgentConfig"]:
@@ -416,6 +425,7 @@ class AgentConfig:
             state_path=state_path,
             log_file=log_file,
             err_log_file=err_file,
+            device_friendly_name=(data.get("device_friendly_name") or "").strip() or None,
             debug_mqtt=debug_mqtt,
             track_active_app=track_active_app,
             managed_user=managed_user,
@@ -622,9 +632,16 @@ class ScreenTimeAgent:
 
     def _discovery_device(self) -> dict:
         dev_id = f"{self.config.child_id}_{self.config.device_id}_mac"
+        name = f"{self.config.child_id} mac"
+        if self.config.device_friendly_name:
+            # e.g. "cj mac (Living Room MacBook)" — without this, a kid
+            # who uses more than one Mac gets multiple HA devices that
+            # all display as the exact same name, with no way to tell
+            # them apart short of digging into each one's entities.
+            name = f"{name} ({self.config.device_friendly_name})"
         return {
             "identifiers": [dev_id],
-            "name": f"{self.config.child_id} mac",
+            "name": name,
             "manufacturer": "Screen Time Agent",
             "model": "macOS agent",
             "sw_version": VERSION,

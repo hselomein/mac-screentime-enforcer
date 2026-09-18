@@ -38,11 +38,22 @@
         <false/>
     </dict>
 
+    <!--
+    Deliberately /dev/null, not /var/log: this LaunchAgent runs as the
+    unprivileged managed kid, and /var/log is root:wheel — not writable by
+    a regular user (confirmed directly: a non-root `touch` there fails
+    with Permission denied). Also loaded into every session from this one
+    shared plist file, so a literal path would collide across users
+    anyway. user_voice_helper.py sets up its own per-user, correctly-
+    expanded log file under ~/Library/Logs instead (see _setup_logging in
+    that script) — this only discards the rare raw print/traceback from
+    before that's configured.
+    -->
     <key>StandardOutPath</key>
-    <string>/var/log/ha-user-voice-helper.out.log</string>
+    <string>/dev/null</string>
 
     <key>StandardErrorPath</key>
-    <string>/var/log/ha-user-voice-helper.err.log</string>
+    <string>/dev/null</string>
 
     <key>LimitLoadToSessionType</key>
     <array>

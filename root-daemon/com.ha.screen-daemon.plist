@@ -15,6 +15,10 @@
     bootstrap step and nothing tied to logout/login — this starts at boot
     and runs continuously, which is the whole point: it removes the
     "reboot needed between account switches" problem at the source.
+
+    This file is a reference copy — scripts/install_root_daemon.sh
+    generates and installs this same content itself, so editing this file
+    alone does not change an installed daemon's behavior.
     -->
     <key>Label</key>
     <string>com.ha.screen-daemon</string>
@@ -25,11 +29,15 @@
     see paho-mqtt (it's installed under a regular user's site-packages,
     invisible to root). This venv already has paho-mqtt, pyobjc/Quartz,
     and SystemConfiguration all confirmed working as root.
+
+    Both scripts install into the SAME shared directory
+    (/Library/Application Support/ha-screen-agent) — one venv, one
+    config.json, used by the old per-user agent and this daemon alike.
     -->
     <key>ProgramArguments</key>
     <array>
         <string>/Library/Application Support/ha-screen-agent/venv/bin/python3</string>
-        <string>/Library/Application Support/ha-screen-daemon/daemon.py</string>
+        <string>/Library/Application Support/ha-screen-agent/root_daemon.py</string>
     </array>
 
     <key>RunAtLoad</key>

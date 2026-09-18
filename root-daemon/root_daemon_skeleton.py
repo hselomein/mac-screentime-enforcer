@@ -381,8 +381,15 @@ class DaemonMqttConfig:
         rapid_relogin_max_attempts: int,
         rapid_relogin_warn_attempt: int,
         rapid_relogin_warn_voice: bool,
+        dry_run: bool = False,
+        device_friendly_name: Optional[str] = None,
     ) -> None:
         self.device_id = _sanitize_device_id(device_id)
+        # Purely cosmetic — shown in HA's device name so a parent can
+        # tell this Mac apart from others the same kid uses. device_id
+        # itself stays a stable, sanitized topic-building identifier,
+        # not meant to double as a nice label.
+        self.device_friendly_name = device_friendly_name
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
         self.mqtt_username = mqtt_username
@@ -396,6 +403,18 @@ class DaemonMqttConfig:
         self.rapid_relogin_max_attempts = rapid_relogin_max_attempts
         self.rapid_relogin_warn_attempt = rapid_relogin_warn_attempt
         self.rapid_relogin_warn_voice = rapid_relogin_warn_voice
+        # Observe-only mode: detection, tracking, and HA reporting all run
+        # normally, but lock_session()/shutdown_computer() are never
+        # actually called — just logged as "[DRY RUN] would ...". Exists
+        # for the one legitimate case where this daemon and the old
+        # per-user agent run on the same machine at once: validating this
+        # daemon's detection logic against real usage while the old agent
+        # stays the sole real enforcement. Running both with dry_run OFF
+        # is NOT safe — see Context/HANDOFF.md, "old agent + new daemon
+        # coexistence" — the same backgrounded-session lock collision that
+        # motivated this rewrite still applies regardless of which tool
+        # triggers it.
+        self.dry_run = dry_run
 
     @classmethod
     def load(cls, config_path: str) -> "DaemonMqttConfig":
@@ -450,6 +469,8 @@ class DaemonMqttConfig:
                 )
             ),
             rapid_relogin_warn_voice=bool(data.get("rapid_relogin_warn_voice", True)),
+            dry_run=bool(data.get("root_daemon_dry_run", False)),
+            device_friendly_name=(data.get("device_friendly_name") or "").strip() or None,
         )
 
 
@@ -793,13 +814,24 @@ def session_state_topic(topic_prefix: str, device_id: str) -> str:
 ROOT_DAEMON_VERSION = "0.1.0-skeleton"
 
 
-def _discovery_device(child: str, device_id: str) -> dict:
+def _discovery_device(
+    child: str, device_id: str, friendly_name: Optional[str] = None
+) -> dict:
     """Same identifiers screentime_enforcer.py's _discovery_device uses,
     so this groups under the SAME existing device card in HA rather than
-    creating a duplicate."""
+    creating a duplicate.
+
+    friendly_name is purely cosmetic (e.g. "cj mac (Living Room
+    MacBook)") — without it, a kid who uses more than one Mac gets
+    multiple HA devices that all display as the exact same name, with no
+    way to tell them apart short of digging into each one's entities.
+    """
+    name = f"{child} mac"
+    if friendly_name:
+        name = f"{name} ({friendly_name})"
     return {
         "identifiers": [f"{child}_{device_id}_mac"],
-        "name": f"{child} mac",
+        "name": name,
         "manufacturer": "Screen Time Agent",
         "model": "macOS agent",
         "sw_version": ROOT_DAEMON_VERSION,
@@ -885,7 +917,9 @@ def build_mqtt_client(
                 "unique_id": f"{base_id}_session_state",
                 "state_topic": session_state_topic(prefix, mqtt_config.device_id),
                 "icon": "mdi:account-clock",
-                "device": _discovery_device(child, mqtt_config.device_id),
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
             }
             client.publish(
                 discovery_topic, json.dumps(discovery_payload), retain=True, qos=1
@@ -914,7 +948,9 @@ def build_mqtt_client(
                 "payload_off": "0",
                 "retain": True,
                 "icon": "mdi:shield-check",
-                "device": _discovery_device(child, mqtt_config.device_id),
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
             }
             client.publish(
                 allowed_discovery_topic,
@@ -942,7 +978,9 @@ def build_mqtt_client(
                 "retain": True,
                 "unit_of_measurement": "min",
                 "icon": "mdi:timer-sand",
-                "device": _discovery_device(child, mqtt_config.device_id),
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
             }
             client.publish(
                 budget_discovery_topic,
@@ -969,7 +1007,9 @@ def build_mqtt_client(
                 "retain": True,
                 "unit_of_measurement": "min",
                 "icon": "mdi:timer-plus",
-                "device": _discovery_device(child, mqtt_config.device_id),
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
             }
             client.publish(
                 bonus_discovery_topic,
@@ -994,7 +1034,9 @@ def build_mqtt_client(
                 "retain": True,
                 "unit_of_measurement": "min",
                 "icon": "mdi:timer-lock",
-                "device": _discovery_device(child, mqtt_config.device_id),
+                "device": _discovery_device(
+                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
+                ),
             }
             client.publish(
                 max_bonus_discovery_topic,
@@ -1390,7 +1432,15 @@ def main() -> None:
                                         )
                                 rapid_relogin_warned_count[enforced_child] = attempt_count
                             if attempt_count >= mqtt_config.rapid_relogin_max_attempts:
-                                shutdown_computer()
+                                if mqtt_config.dry_run:
+                                    logger.warning(
+                                        "[DRY RUN] Would shut down now: '%s' hit "
+                                        "%d rapid relogin attempts.",
+                                        enforced_child,
+                                        attempt_count,
+                                    )
+                                else:
+                                    shutdown_computer()
 
                     if blocked and not locked:
                         uid = all_sessions.get(current_user)
@@ -1400,6 +1450,14 @@ def main() -> None:
                                 "session list.",
                                 enforced_child,
                                 current_user,
+                            )
+                        elif mqtt_config.dry_run:
+                            logger.warning(
+                                "[DRY RUN] Would lock '%s' now (allowed=%s, "
+                                "fail_mode=%s).",
+                                enforced_child,
+                                allowed_state.get(enforced_child),
+                                mqtt_config.fail_mode,
                             )
                         else:
                             logger.warning(

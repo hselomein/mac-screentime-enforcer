@@ -34,17 +34,28 @@ from __future__ import annotations
 import getpass
 import json
 import logging
+from pathlib import Path
 import subprocess
 
 import paho.mqtt.client as mqtt  # type: ignore
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
 logger = logging.getLogger("user-voice-helper")
 
 CONFIG_PATH = "/Library/Application Support/ha-screen-agent/config.json"
+
+# ~/Library/Logs, not /var/log: this runs as an unprivileged per-user
+# LaunchAgent (bootstrapped into gui/<uid>), and /var/log is root:wheel —
+# not writable by a regular user (confirmed: a non-root `touch` there gets
+# Permission denied). ~/Library/Logs is the standard per-user location,
+# always writable by that user, and — unlike /tmp — survives reboots.
+LOG_PATH = Path("~/Library/Logs/ha-user-voice-helper/helper.log").expanduser()
+
+
+def _setup_logging() -> None:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(LOG_PATH)
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
 
 
 def _sanitize_device_id(value: str) -> str:
@@ -66,6 +77,7 @@ def speak_locally(text: str) -> None:
 
 
 def main() -> None:
+    _setup_logging()
     mac_user = getpass.getuser()
 
     with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
