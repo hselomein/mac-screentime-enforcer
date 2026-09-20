@@ -35,3 +35,62 @@
 # See the main README's "Home Assistant integration" section for the
 # full walkthrough, and config/CONFIG_REFERENCE.md for what every
 # config.json field on the Mac side actually does.
+#
+# ---------------------------------------------------------------------
+# Optional: ONE combined budget across multiple Macs, instead of a
+# separate budget per machine
+# ---------------------------------------------------------------------
+# By default (kid_mac_budget_enforcement.yaml), a kid's minutes and
+# budget are tracked PER MAC — minutes_today and daily_budget both
+# include device_id in their topic. That's correct for a household that
+# WANTS separate per-machine limits. It's wrong for one that doesn't: a
+# kid with a 60-minute budget on two Macs effectively gets 120 minutes,
+# since each machine enforces its own budget independently even though
+# the `allowed` switch they both obey is shared.
+#
+# If you want one real combined total instead, use
+# kid_mac_budget_enforcement_combined.yaml — but it needs two pieces of
+# actual hand-written YAML first, since a blueprint can only define
+# automations, not sensors or helpers:
+#
+# 1. A template sensor per kid, summing their minutes-today sensor
+#    across every Mac they use (adjust the entity_ids to your real
+#    ones — these are illustrative, same caveat as everywhere else in
+#    this file):
+#
+#    template:
+#      - sensor:
+#          - name: "Kiddo Total Minutes Today"
+#            unique_id: kiddo_total_minutes_today
+#            unit_of_measurement: min
+#            state: >-
+#              {{ (states('sensor.kiddo_mac1_minutes') | int(0))
+#                 + (states('sensor.kiddo_mac2_minutes') | int(0))
+#                 + (states('sensor.kiddo_mac3_minutes') | int(0)) }}
+#
+#    int(0) as the default matters: if a Mac is asleep/offline, its
+#    sensor can briefly read "unknown" — without a default, the whole
+#    template errors out instead of just treating that Mac as 0 for the
+#    moment.
+#
+# 2. An input_number helper per kid, standing in for the single shared
+#    daily budget (instead of each Mac's own per-device number entity).
+#    Either via YAML:
+#
+#    input_number:
+#      kiddo_daily_budget_min:
+#        name: "Kiddo Daily Budget (Combined)"
+#        min: 0
+#        max: 600
+#        step: 5
+#        unit_of_measurement: min
+#        icon: mdi:timer-sand
+#
+#    ...or simpler: Settings -> Devices & Services -> Helpers -> Create
+#    Helper -> Number, no YAML needed either way.
+#
+# With both of those in place, create ONE automation per kid (not per
+# kid-per-machine) from kid_mac_budget_enforcement_combined.yaml,
+# pointing it at the template sensor and input_number above instead of
+# any single Mac's own entities. The two blueprints aren't meant to be
+# mixed for the same kid — pick one model per kid, not both.

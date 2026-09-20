@@ -1,0 +1,124 @@
+blueprint:
+  name: Kid Mac Budget Enforcement (Combined Total)
+  description: >-
+    Alternative to kid_mac_budget_enforcement.yaml, for households that want
+    ONE shared daily budget across every Mac a kid uses, instead of a
+    separate budget per machine. With the plain (per-machine) blueprint, a
+    kid with a 60-minute budget on two Macs effectively gets 120 minutes —
+    the same allowed switch is shared, but each Mac tracks its own minutes
+    against its own budget independently. This one compares a single
+    combined minutes total against a single shared budget instead, so using
+    up the budget on one Mac correctly blocks the kid on all of them.
+
+    This does NOT replace the per-machine blueprint — some households
+    genuinely want separate per-machine limits, and that one still works
+    fine for that. Use whichever model fits; they're not meant to be mixed
+    for the same kid.
+
+    Requires two pieces of HA-side setup this blueprint does NOT create for
+    you (blueprints can only define automations, not sensors or helpers):
+      1. A template sensor per kid that sums their minutes-today sensor
+         across every Mac they use. See configuration.yaml in this repo for
+         an example.
+      2. One `input_number` helper per kid, standing in for the single
+         shared daily budget (instead of each Mac's own per-device number).
+
+    Import this blueprint once, then create one automation PER KID from it
+    (not per kid-per-machine) — the combined sensor and shared budget
+    already cover every Mac that kid uses.
+  domain: automation
+  source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement_combined.yaml
+  input:
+    automation_name:
+      name: Automation Name
+      description: >-
+        Since you create one instance of this PER KID, they'd otherwise all
+        show up with the same generic name. Change this per kid (e.g. "Kid
+        Mac Budget Enforcement — Combined — aaron").
+      default: "Kid Mac Budget Enforcement (Combined Total)"
+      selector:
+        text: {}
+    total_minutes_sensor:
+      name: Combined Minutes Sensor
+      description: >-
+        This kid's COMBINED minutes-today template sensor (summed across
+        every Mac they use) — NOT any single Mac's own minutes sensor. See
+        configuration.yaml for how to define this; it has to exist before
+        this blueprint has anything to compare against.
+      selector:
+        entity:
+          domain: sensor
+    daily_budget_entity:
+      name: Shared Daily Budget
+      description: >-
+        The single input_number helper holding this kid's real combined
+        daily budget (minutes) — not any individual Mac's own per-device
+        daily_budget number entity.
+      selector:
+        entity:
+          domain: input_number
+    parent_override_switches:
+      name: Parent Override Switches
+      description: >-
+        Every Mac this kid uses has its OWN Parent Override switch (there's
+        no combined one) — pick all of them here. While ANY of them is on,
+        this automation does nothing, so a parent can hold `allowed` by
+        flipping override on whichever specific Mac the kid is actually
+        using, without needing to toggle every Mac's switch.
+      selector:
+        entity:
+          domain: switch
+          multiple: true
+    allowed_topic:
+      name: Allowed MQTT Topic
+      description: >-
+        The MQTT topic to publish the allowed state to, matching this kid's
+        topic_prefix (e.g. screen/cj/allowed) — same shared, non-device-
+        scoped topic the plain budget blueprint uses. Publishing here
+        affects every Mac this kid uses at once, which is what makes the
+        combined model actually enforce correctly.
+      selector:
+        text: {}
+
+alias: !input automation_name
+
+trigger:
+  - platform: state
+    entity_id: !input total_minutes_sensor
+  - platform: state
+    entity_id: !input daily_budget_entity
+
+condition:
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: !input parent_override_switches
+        state: "on"
+        match: any
+
+action:
+  - choose:
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input total_minutes_sensor
+            above: !input daily_budget_entity
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: !input allowed_topic
+              qos: 1
+              retain: true
+              payload: "0"
+      - conditions:
+          - condition: numeric_state
+            entity_id: !input total_minutes_sensor
+            below: !input daily_budget_entity
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: !input allowed_topic
+              qos: 1
+              retain: true
+              payload: "1"
+
+mode: single

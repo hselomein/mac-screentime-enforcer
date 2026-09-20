@@ -21,7 +21,7 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
 ## Install (parent admin account)
 
 1. Install Command Line Tools: `xcode-select --install`
-2. Clone: `git clone https://github.com/your-org/mac-screentime-enforcer.git && cd mac-screentime-enforcer`
+2. Clone: `git clone https://github.com/hselomein/mac-screentime-enforcer.git && cd mac-screentime-enforcer`
 3. Install as root: `sudo ./scripts/install_service.sh`
    - Prompts for child name, device ID, MQTT host/creds, managed users (mac_user=child_name pairs), optional active-app sensor if no config exists. Default managed user is the child name (set it to the child’s macOS short name if different).
    - Reuse an existing config via `--config /path/to/config.json`.
@@ -114,6 +114,16 @@ budget at that point would silently do nothing, since nothing was left to
 re-trigger the automation. The blueprint triggers on **both** the minutes
 sensor and the daily budget number, so a budget change re-evaluates
 `allowed` immediately, even while a kid is currently locked out.
+
+**Multiple Macs per kid?** The blueprint above tracks minutes/budget **per
+machine** — right for a household that wants separate per-Mac limits, wrong
+if you want one combined total across every Mac a kid uses (using up the
+budget on one Mac wouldn't block the others). For that, use
+`kid_mac_budget_enforcement_combined.yaml` instead — see the "Optional:
+ONE combined budget across multiple Macs" section in
+[`homeassistant/configuration.yaml`](homeassistant/configuration.yaml) for
+the template sensor + helper it needs first. The two aren't meant to be
+mixed for the same kid; pick one model per kid.
 
 For reference, this is the underlying automation each blueprint-created
 instance is equivalent to (with `!input` values filled in for one kid):
