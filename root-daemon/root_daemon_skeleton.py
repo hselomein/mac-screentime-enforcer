@@ -833,14 +833,25 @@ def _discovery_device(
     so this groups under the SAME existing device card in HA rather than
     creating a duplicate.
 
-    friendly_name is purely cosmetic (e.g. "cj mac (Living Room
-    MacBook)") — without it, a kid who uses more than one Mac gets
-    multiple HA devices that all display as the exact same name, with no
-    way to tell them apart short of digging into each one's entities.
+    ALWAYS includes something machine-specific in the device's own
+    display "name" — device_id if friendly_name isn't set, the
+    friendly_name itself if it is. This isn't just cosmetic: confirmed
+    on real hardware that when two DIFFERENT devices (different
+    `identifiers`, i.e. different Macs) share the exact same display
+    name for the same kid — which is what a bare f"{child} mac" gives
+    you across every Mac that kid uses — HA's own entity_id collision
+    disambiguation kicks in and produces genuinely unpredictable,
+    inconsistent entity_ids (observed directly: one Mac got
+    "screentime_cj_mac_screentime_cj_mac_minutes", a second got
+    "screentime_cj_mac_macbookprom2_screentime_cj_mac_minutes" — not a
+    simple _2/_3 suffix, not guessable from the naming scheme alone).
+    Giving every device a unique display name from the start means HA
+    never has to invoke that disambiguation at all, so entity_ids come
+    out in the same predictable shape on every machine. Does NOT
+    retroactively rename entities HA already created under the old
+    colliding scheme — only affects devices discovered fresh from here.
     """
-    name = f"{child} mac"
-    if friendly_name:
-        name = f"{name} ({friendly_name})"
+    name = f"{child} mac ({friendly_name or device_id})"
     return {
         "identifiers": [f"{child}_{device_id}_mac"],
         "name": name,

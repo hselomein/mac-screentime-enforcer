@@ -632,13 +632,14 @@ class ScreenTimeAgent:
 
     def _discovery_device(self) -> dict:
         dev_id = f"{self.config.child_id}_{self.config.device_id}_mac"
-        name = f"{self.config.child_id} mac"
-        if self.config.device_friendly_name:
-            # e.g. "cj mac (Living Room MacBook)" — without this, a kid
-            # who uses more than one Mac gets multiple HA devices that
-            # all display as the exact same name, with no way to tell
-            # them apart short of digging into each one's entities.
-            name = f"{name} ({self.config.device_friendly_name})"
+        # ALWAYS includes something machine-specific (device_id if no
+        # friendly_name set) — not just cosmetic. Confirmed on real
+        # hardware: two devices sharing the exact same display name for
+        # the same kid makes HA's own entity_id collision disambiguation
+        # produce unpredictable, inconsistent entity_ids per machine
+        # (not a simple _2/_3 suffix). See root_daemon_skeleton.py's
+        # _discovery_device for the full real-hardware evidence.
+        name = f"{self.config.child_id} mac ({self.config.device_friendly_name or self.config.device_id})"
         return {
             "identifiers": [dev_id],
             "name": name,
