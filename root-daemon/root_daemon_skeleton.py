@@ -1448,8 +1448,15 @@ def main() -> None:
                         mqtt_config.fail_mode == "grace"
                         and allowed_state.get(should_be_active) is None
                     ):
+                        # setdefault, not [...]: this runs before the
+                        # ENFORCEMENT block's resolve_allowed() has started
+                        # the timer on the first tick, and a KeyError here
+                        # crash-looped the daemon under launchd KeepAlive.
+                        started = grace_started_at.setdefault(
+                            should_be_active, time.monotonic()
+                        )
                         remaining = mqtt_config.fail_grace_minutes - (
-                            (time.monotonic() - grace_started_at[should_be_active]) / 60.0
+                            (time.monotonic() - started) / 60.0
                         )
                         logger.warning(
                             "'%s' is in the fail-mode grace window (no allowed "
