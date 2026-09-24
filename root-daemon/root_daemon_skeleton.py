@@ -1160,6 +1160,10 @@ def build_mqtt_client(
                 "command_topic": override_state_topic(child, mqtt_config.device_id),
                 "payload_on": "ON",
                 "payload_off": "OFF",
+                # Same fix as allowed/daily_budget: without this, HA doesn't
+                # retain a parent's toggle, so after an HA/broker restart the
+                # switch reads unknown/off and enforcement silently resumes.
+                "retain": True,
                 "icon": "mdi:shield-star",
                 "device": _discovery_device(
                     child, mqtt_config.device_id, mqtt_config.device_friendly_name
