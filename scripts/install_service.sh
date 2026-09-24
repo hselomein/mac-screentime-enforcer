@@ -309,9 +309,10 @@ LaunchAgent        : $PLIST_PATH
 
 Next steps:
   1. Confirm config values (managed_users, device_id, MQTT credentials) are correct in $CONFIG_PATH.
-  2. In Home Assistant, add the automations from the README (allow under budget, block when out, reset daily) and confirm MQTT topics match.
+  2. In Home Assistant, import the blueprints from the README (budget enforcement, daily reset) and confirm MQTT topics match.
   3. Log into the child account and verify the agent is running:
-       log show --predicate 'process == "python3"' --last 5m | grep ha-screen-agent
+       launchctl print gui/\$(id -u)/com.ha.screen-agent | grep state
+       tail ~/Library/Logs/ha-screen-agent/agent.out.log
   4. Toggle the 'allowed' switch in Home Assistant (or publish screen/<child>/allowed) to confirm enforcement.
 ------------------------------------------------------------
 EOF

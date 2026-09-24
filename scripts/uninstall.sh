@@ -10,7 +10,9 @@ Usage:
 
 Default (no flags):
   Removes only the new root daemon + voice helper (LaunchDaemon, LaunchAgent,
-  installed scripts, root-daemon state, logs). Leaves config.json, the
+  installed scripts, root-daemon state, and the /var/log logs; each kid's
+  per-user ~/Library/Logs/ha-user-voice-helper is only removed with --all).
+  Leaves config.json, the
   shared venv, and the old per-user agent (if installed) untouched — useful
   if you're reverting a machine back to the old agent only.
 

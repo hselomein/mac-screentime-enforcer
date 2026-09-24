@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-Skeleton for the root-level, multi-user-aware Screen Time daemon.
+Root-level, multi-user-aware Screen Time daemon — the replacement for the
+per-user screentime_enforcer.py agent. (The filename still says "skeleton"
+from when it started as one; it's the full daemon now.)
 
-This is NOT a drop-in replacement for screentime_enforcer.py yet — it's a
-starting skeleton for the specific new piece the per-user LaunchAgent
-architecture can't do: knowing WHO is currently at the console, from a
-single always-running, root-owned process, without depending on macOS
-bootstrapping a separate agent per account.
+One root LaunchDaemon per Mac, installed by scripts/install_root_daemon.sh
+as /Library/Application Support/ha-screen-agent/root_daemon.py. It knows
+WHO is at the console from a single always-running process, tracks each
+managed kid's minutes (persisted per kid, reset at local midnight), publishes
+MQTT discovery + telemetry to Home Assistant, obeys each kid's retained
+`allowed` topic by locking the screen, escalates rapid re-logins to a
+shutdown, and sends voice warnings through the per-user user_voice_helper.py
+(root has no audio session of its own). Logs to /var/log/root_daemon_skeleton.log.
 
 Design goals carried over from the requirements doc (project plan, Section 13):
   - One process per machine (not one per managed user)
@@ -26,17 +31,12 @@ Design goals carried over from the requirements doc (project plan, Section 13):
     switch into an already-unlocked SIBLING session and use their time
     instead — a social/policy problem between siblings, not an
     enforcement gap.
-  - Reuse the existing lock/kill/rapid-relogin/voice logic from
-    screentime_enforcer.py once this loop is proven out — this file only
-    covers the NEW piece (session + lock-state detection), not a full
-    reimplementation
   - One MQTT identity per machine (not per kid) — matches the ACL model
     already in place
 
-Run this manually first (as root, via `sudo python3 root_daemon_skeleton.py`)
-to validate console-user detection on real hardware before wiring it into a
-LaunchDaemon plist. Console user detection is the part most worth proving
-out first, since it's the actual new capability this rewrite depends on.
+Not handled yet: idle time (a kid who walks away unlocked keeps accruing),
+and real offline behavior — once an `allowed` value has arrived it's kept
+through any outage; fail_mode only applies before the first one.
 """
 
 from __future__ import annotations

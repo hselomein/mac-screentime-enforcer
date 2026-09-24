@@ -1,19 +1,18 @@
 blueprint:
   name: Kid Mac Budget Enforcement (Combined Total)
   description: >-
-    Alternative to kid_mac_budget_enforcement.yaml, for households that want
-    ONE shared daily budget across every Mac a kid uses, instead of a
-    separate budget per machine. With the plain (per-machine) blueprint, a
-    kid with a 60-minute budget on two Macs effectively gets 120 minutes —
-    the same allowed switch is shared, but each Mac tracks its own minutes
-    against its own budget independently. This one compares a single
-    combined minutes total against a single shared budget instead, so using
-    up the budget on one Mac correctly blocks the kid on all of them.
+    For kids who use more than one Mac: compares one combined minutes total
+    (summed across every Mac the kid uses) against one shared daily budget,
+    so using up the budget on one Mac blocks the kid on all of them.
 
-    This does NOT replace the per-machine blueprint — some households
-    genuinely want separate per-machine limits, and that one still works
-    fine for that. Use whichever model fits; they're not meant to be mixed
-    for the same kid.
+    Use this instead of kid_mac_budget_enforcement.yaml for any kid on
+    several Macs. That one is only correct when a kid uses a single Mac:
+    the allowed topic is per kid, so one instance per Mac for the same kid
+    overwrite each other rather than giving separate per-Mac budgets.
+    Don't use both for the same kid.
+
+    Known limitation: Bonus Minutes aren't counted — this compares against
+    the shared budget only. Raise the budget instead of granting bonus.
 
     Requires two pieces of HA-side setup this blueprint does NOT create for
     you (blueprints can only define automations, not sensors or helpers):
@@ -32,9 +31,9 @@ blueprint:
     automation_name:
       name: Automation Name
       description: >-
-        Since you create one instance of this PER KID, they'd otherwise all
-        show up with the same generic name. Change this per kid (e.g. "Kid
-        Mac Budget Enforcement — Combined — aaron").
+        Meant to name the created automation, but in testing HA ignored it.
+        Rename each automation yourself after creating it (e.g. "Kid Mac
+        Budget Enforcement — Combined — aaron").
       default: "Kid Mac Budget Enforcement (Combined Total)"
       selector:
         text: {}
@@ -73,7 +72,7 @@ blueprint:
       name: Allowed MQTT Topic
       description: >-
         The MQTT topic to publish the allowed state to, matching this kid's
-        topic_prefix (e.g. screen/cj/allowed) — same shared, non-device-
+        topic_prefix plus "/allowed" (e.g. screen/screentime_cj/allowed) — same shared, non-device-
         scoped topic the plain budget blueprint uses. Publishing here
         affects every Mac this kid uses at once, which is what makes the
         combined model actually enforce correctly.

@@ -13,47 +13,51 @@ blueprint:
     in an earlier example that only triggered on minutes; fixed here.
 
     Import this blueprint once, then create one automation per managed kid
-    from it, pointing the four inputs at that kid's own entities/topic —
-    no need to hand-edit a copy of the YAML per kid.
+    from it, pointing the inputs at that kid's own entities/topic.
+
+    Only use this if each kid uses ONE Mac. The allowed topic is per kid,
+    not per Mac, so separate instances for the same kid on different Macs
+    overwrite each other instead of giving per-Mac budgets. For a kid on
+    several Macs, use kid_mac_budget_enforcement_combined.yaml.
+
+    Known limitations: Bonus Minutes aren't counted (it compares against
+    the base budget only, though the root daemon announces base + bonus),
+    and minutes exactly equal to the budget publish nothing until the next
+    minute.
   domain: automation
   source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
   input:
     automation_name:
       name: Automation Name
       description: >-
-        Since you create one instance of this blueprint PER kid, they'd
-        otherwise all show up in HA with the exact same generic name
-        ("Kid Mac Budget Enforcement") with nothing to tell them apart
-        in the automations list. Change this per kid (e.g. "Kid Mac
-        Budget Enforcement — aaron") — still editable later like any
-        automation's name.
+        Meant to name the created automation, but in testing HA ignored it
+        and every instance still got the generic blueprint name. Rename
+        each automation yourself after creating it (e.g. "Kid Mac Budget
+        Enforcement — aaron").
       default: "Kid Mac Budget Enforcement"
       selector:
         text: {}
     minutes_sensor:
       name: Minutes Sensor
       description: >-
-        The kid's Mac minutes sensor (HA name "<child> Mac Minutes",
-        so likely something like sensor.cj_mac_minutes — check
-        Settings → Devices & Services → MQTT → the kid's Mac device for
-        the exact entity_id, since HA's exact naming can vary).
+        The kid's "<child> Mac Minutes" sensor. Search the kid's name in
+        the picker; don't guess the entity_id, HA builds it from the device
+        name too (e.g. sensor.screentime_cj_mac_screentime_cj_mac_minutes).
       selector:
         entity:
           domain: sensor
     daily_budget_entity:
       name: Daily Budget Number
       description: >-
-        The kid's daily budget (minutes) number entity (HA name "<child>
-        Mac Daily Budget (min)", likely number.cj_mac_daily_budget_min —
-        check the kid's Mac device page for the exact entity_id).
+        The kid's "<child> Mac Daily Budget (min)" number entity, from the
+        same Mac device as the minutes sensor.
       selector:
         entity:
           domain: number
     parent_override_switch:
       name: Parent Override Switch
       description: >-
-        The kid's parent override switch (HA name "<child> Mac Parent
-        Override", likely switch.cj_mac_parent_override) — while on, this
+        The kid's "<child> Mac Parent Override" switch — while on, this
         automation does nothing, letting a parent hold `allowed` at
         whatever they've manually set regardless of minutes/budget.
       selector:
@@ -63,7 +67,8 @@ blueprint:
       name: Allowed MQTT Topic
       description: >-
         The MQTT topic to publish the allowed state to, matching that kid's
-        topic_prefix in config.json (e.g. screen/cj/allowed).
+        topic_prefix in config.json plus "/allowed" (e.g.
+        screen/screentime_cj/allowed when child_name is screentime_cj).
       selector:
         text: {}
 

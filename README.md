@@ -7,10 +7,11 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
 
 ## What you get
 
-- **Accurate local tracking**: counts minutes only when the child session is unlocked and not idle.
-- **Enforcement**: locks or logs out within seconds when HA publishes `allowed=0`.
-- **MQTT discovery & telemetry**: retained minutes, live active flag, heartbeat status, optional active app sensor.
-- **Fail-safe defaults**: configurable grace window; fails closed when MQTT is down or config is bad.
+- **Local tracking**: minutes count only while the kid is the console user and the screen is unlocked; a backgrounded (fast-user-switched) or locked session pauses. The old agent also pauses after `idle_timeout_seconds` of no input; **the root daemon has no idle detection yet**, so a kid who walks away unlocked keeps accruing time.
+- **Enforcement**: when HA publishes `allowed=0`, the root daemon locks the screen (`pmset displaysleepnow`); the old agent locks or logs out. Both escalate repeated unlock attempts to a shutdown (rapid-relogin protection).
+- **MQTT discovery & telemetry**: entities appear in HA automatically. Root daemon, per kid per Mac: minutes, active, online, session state, allowed, daily budget, bonus minutes, max bonus minutes, parent override. The old agent adds a JSON heartbeat and an optional active-app sensor, and has no session-state or bonus entities.
+- **Voice warnings** (root daemon, via a per-user helper): budget set/changed, bonus granted, 15/10/5/1 minutes left, and rapid-relogin warnings.
+- **Fail-safe when HA has never answered**: see `fail_mode` in [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md). Once the root daemon has received an `allowed` value it keeps enforcing that last value through a later MQTT outage.
 
 ## Requirements
 
@@ -26,7 +27,7 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
    - Prompts for child name, device ID, MQTT host/creds, managed users (mac_user=child_name pairs), optional active-app sensor if no config exists. Default managed user is the child name (set it to the child’s macOS short name if different).
    - Reuse an existing config via `--config /path/to/config.json`.
 4. Update later: edit `/Library/Application Support/ha-screen-agent/config.json` as root, rerun the installer.
-5. Log in as the child and verify: `log show --predicate 'process == "python3"' --last 5m | grep ha-screen-agent`
+5. Log in as the child and verify: `launchctl print gui/$(id -u)/com.ha.screen-agent | grep state`, then `tail ~/Library/Logs/ha-screen-agent/agent.out.log`. (`log show` won't find it: the agent logs to that file, not macOS's unified log.)
 6. Home Assistant: with MQTT discovery on, a device named `<child> mac` appears under **Settings → Devices & Services → Integrations → MQTT** with minutes, active, allowed switch, budget number, parent override switch, optional active-app sensor. Add the automations below to drive `allowed`.
 
 ### macOS prompts & permissions
@@ -80,21 +81,40 @@ at the existing config, not starting over.
      HA only, never locks or shuts down) — the only combination that's
      actually safe to run together, useful for validating the new
      daemon's detection on your hardware before cutting over for real.
-   - At the end it offers to print both HA blueprints straight to the
-     terminal for copy/paste.
-2. Confirm it's running: `log show --predicate 'process == "python3"' --last 5m | grep ha-screen-daemon`
-3. To remove it later: `sudo ./scripts/uninstall.sh` (add `--all` to also
+   - At the end it prints ready-to-paste raw GitHub URLs for the HA
+     blueprints (HA's Import Blueprint dialog only accepts a URL),
+     derived from this checkout's git remote.
+2. Confirm it's running: `sudo launchctl list | grep com.ha.screen-daemon`
+   (a PID means running), then `sudo tail -50 /var/log/root_daemon_skeleton.log`.
+   `log show` won't show anything: the daemon logs to that file, not to
+   macOS's unified log.
+3. To update after a `git pull`: rerun the installer (it offers to keep the
+   existing config), then `sudo launchctl kickstart -k system/com.ha.screen-daemon`.
+4. To remove it later: `sudo ./scripts/uninstall.sh` (add `--all` to also
    remove the old agent, shared config, and venv — leaves nothing behind).
+
+**Known limitations (root daemon):** no idle detection (see above);
+minutes are counted as fixed 2-second ticks, which slightly undercounts;
+at midnight only the kid currently at a Mac gets their minutes reset to 0
+in HA, so a kid who doesn't use that Mac today keeps yesterday's number
+there; a clean `launchctl` stop skips shutdown cleanup (up to 30s of
+usage lost, "Agent Online" stays on); and `config.json`, which holds the
+Mac's MQTT password, is group-readable by the first managed kid's primary
+group, which on a stock Mac is `staff` (every local account).
 
 ## Home Assistant integration
 
-- **MQTT topics (child_id=kiddo, device_id=mac-mini)**  
-  - Agent → HA (retained): `screen/kiddo/mac/mac-mini/minutes_today` (integer minutes)  
-  - Agent → HA (retained): `screen/kiddo/mac/mac-mini/active` (`0/1`)  
-  - Agent → HA: `screen/kiddo/mac/mac-mini/status` (JSON heartbeat)  
-  - HA → Agent (retained): `screen/kiddo/allowed` (`0/1`, `on/off`, `true/false`)
-- **Discovery entities**: minutes sensor, active binary sensor, allowed switch, daily budget number (HA-managed), parent override switch (HA-managed), optional active app sensor. Entity names follow "`<child> Mac <Field>`" (e.g. "kiddo Mac Allowed") — HA slugifies that into the entity_id itself (likely `switch.kiddo_mac_allowed`, no device name baked in), but the exact slug can vary by HA version, so check the kid's Mac device page under **Settings → Devices & Services → MQTT** rather than assuming any example below is exact.
-- **Daily reset**: the agent resets its local minutes at midnight while running. If it is offline at midnight, wrap the minutes sensor in a HA `utility_meter` with a daily cycle to keep a strict per-day view.
+- **MQTT topics (child_name=kiddo, device_id=mac-mini)**  
+  - Mac → HA (retained): `screen/kiddo/mac/mac-mini/minutes_today` (integer minutes)  
+  - Mac → HA: `screen/kiddo/mac/mac-mini/active` (`0/1`)  
+  - Mac → HA (retained): `screen/kiddo/mac/mac-mini/availability` (`online`/`offline`)  
+  - Mac → HA (retained, root daemon only): `screen/kiddo/mac/mac-mini/session_state` (`active`/`locked`/`backgrounded`/`offline`)  
+  - Mac → HA (old agent only): `screen/kiddo/mac/mac-mini/status` (JSON heartbeat)  
+  - HA → Mac (retained): `screen/kiddo/allowed` (`0/1`, `on/off`, `true/false`) — **per kid, not per Mac**: every Mac managing kiddo obeys this one topic.  
+  - HA ↔ Mac (retained): `homeassistant/kiddo_mac-mini_mac/{daily_budget,bonus_minutes,max_bonus_minutes,override}/state` — the number/switch entities' own state topics, per Mac.  
+  - Mac → voice helper (root daemon only, not retained): `screen/kiddo/mac/mac-mini/voice_command`
+- **Discovery entities**: grouped under one HA device per kid per Mac, named `<child> mac (<friendly name or device_id>)`. Entity names follow `<child> Mac <Field>`. **Don't guess entity_ids from these names**: HA builds them from the device name *and* the entity name, and on real installs they came out as e.g. `sensor.screentime_cj_mac_screentime_cj_mac_minutes`. Pick entities in the blueprint's entity picker, or look them up under **Developer Tools → States**.
+- **Daily reset**: minutes reset locally at midnight (the root daemon persists them per kid, so a restart doesn't lose the day). The root daemon only republishes the new 0 for whichever kid is at the Mac, so a kid who doesn't use that Mac today still shows yesterday's minutes there in HA until they next do.
 
 ### Budget enforcement automation
 
@@ -102,9 +122,12 @@ at the existing config, not starting over.
 instead of hand-copying YAML per kid — import it into Home Assistant once
 (Settings → Automations & Scenes → Blueprints → Import Blueprint, or drop the
 file into your `config/blueprints/automation/` folder), then create one
-automation per managed kid from it, filling in that kid's four entities
-(minutes sensor, daily budget number, parent override switch, allowed MQTT
-topic).
+automation per managed kid from it, filling in that kid's minutes sensor,
+daily budget number, parent override switch, and allowed MQTT topic
+(`screen/<child_name>/allowed`). Rename each automation yourself after
+creating it: the blueprint's "Automation Name" input does not actually set
+the name in testing, so every instance otherwise shows up with the same
+generic title.
 
 This fixes a real gap an earlier version of this example had: it only
 triggered on the minutes sensor changing. That's fine while a kid is
@@ -115,15 +138,28 @@ re-trigger the automation. The blueprint triggers on **both** the minutes
 sensor and the daily budget number, so a budget change re-evaluates
 `allowed` immediately, even while a kid is currently locked out.
 
-**Multiple Macs per kid?** The blueprint above tracks minutes/budget **per
-machine** — right for a household that wants separate per-Mac limits, wrong
-if you want one combined total across every Mac a kid uses (using up the
-budget on one Mac wouldn't block the others). For that, use
-`kid_mac_budget_enforcement_combined.yaml` instead — see the "Optional:
-ONE combined budget across multiple Macs" section in
-[`homeassistant/configuration.yaml`](homeassistant/configuration.yaml) for
-the template sensor + helper it needs first. The two aren't meant to be
-mixed for the same kid; pick one model per kid.
+**Current limitations of both budget blueprints:**
+- **Bonus minutes aren't counted.** They compare minutes against the base
+  daily budget only. The root daemon announces base + bonus (capped at max
+  bonus) as the kid's total, but HA blocks them at the base. Granting bonus
+  to a kid who's already locked doesn't unlock them either, since nothing
+  triggers on the bonus entities. Workaround until fixed: raise the daily
+  budget instead of granting bonus.
+- **Minutes exactly equal to the budget** match neither branch, so nothing
+  is published at that exact minute; the next minute blocks.
+
+**Use this blueprint only if each kid uses one Mac.** Every instance
+publishes to the same per-kid `screen/<child>/allowed` topic, so if a kid
+has an instance per Mac they overwrite each other: going over budget on one
+Mac locks every Mac, and the next minute tick on a Mac with budget left
+unlocks them all again. It does **not** give separate per-Mac budgets.
+
+**Kid uses more than one Mac?** Use
+`kid_mac_budget_enforcement_combined.yaml` instead, one automation per kid:
+it compares the kid's minutes summed across every Mac against one shared
+budget. It needs a template sensor and an `input_number` helper set up by
+hand first — see "Optional: ONE combined budget across multiple Macs" in
+[`homeassistant/configuration.yaml`](homeassistant/configuration.yaml).
 
 For reference, this is the underlying automation each blueprint-created
 instance is equivalent to (with `!input` values filled in for one kid):
@@ -232,7 +268,11 @@ Configuration lives in `/Library/Application Support/ha-screen-agent/config.json
 
 Edit as admin; keep it root-owned and readable by the child account (e.g., root:<child_group> 0640). The installer prompts for basics when no config exists.
 
-Example for two kids on one Mac:
+Example for two kids on one Mac (old agent). **For the root daemon, give every
+entry a `topic_prefix`**: the old agent defaults a missing one to
+`screen/<child_name>`, but the root daemon silently leaves a kid without one
+off MQTT entirely (no entities, never receives `allowed`, so only `fail_mode`
+governs them). `install_root_daemon.sh` always writes it.
 
 ```json
 {
@@ -272,30 +312,41 @@ separate credentials per kid.
 ├── scripts/install_root_daemon.sh           # Root-daemon + voice-helper installer (run with sudo)
 ├── scripts/uninstall.sh                     # Removes root daemon (or --all: everything), no breadcrumbs
 ├── requirements.txt                         # Python deps (PyObjC, MQTT, etc.) — shared venv, both tools
-├── homeassistant/                           # Example HA snippets & docs
-│   └── blueprints/                          # Reusable automation blueprints (import into HA)
-└── root-daemon/                             # Root-daemon rewrite: root_daemon_skeleton.py, user_voice_helper.py
+├── homeassistant/
+│   ├── blueprints/                          # Budget enforcement (per Mac / combined) + daily reset
+│   ├── configuration.yaml                   # Notes: what discovery creates, combined-budget helpers
+│   └── mosquitto.acl                        # Annotated broker ACL example
+└── root-daemon/
+    ├── root_daemon_skeleton.py              # The daemon (installed as .../ha-screen-agent/root_daemon.py)
+    ├── user_voice_helper.py                 # Per-user voice helper
+    └── *.plist                              # Reference copies; the installer generates the real ones
 ```
 
 ## Security & hardening
 
-- Install and own all files as `root:wheel`; child account stays non-admin.
-- LaunchAgent lives in `/Library/LaunchAgents` and is bootstrapped into the child’s GUI session.
-- Default behavior is **fail-safe**: when MQTT is down beyond the grace window, the Mac locks until connectivity returns.
-- `managed_users` controls which macOS accounts the agent will run under; broker ACLs should still enforce per-child topics.
-- Rapid relogin protection is enabled by default: if a blocked child unlocks the session 4 times within 60 seconds, the agent warns on attempt 3 and shuts the Mac down on attempt 4.
+- Install and own all files as `root:wheel`; child accounts stay non-admin.
+- Root daemon: a `/Library/LaunchDaemons` job running as root, plus a voice-helper LaunchAgent in `/Library/LaunchAgents` that loads into every GUI session and exits immediately for non-managed accounts. Old agent: a LaunchAgent bootstrapped into each managed kid's GUI session.
+- **The MQTT password in `config.json` is readable by the kids.** The file is `0640`, group-owned by the first managed kid's primary group so the per-user voice helper (and the old agent) can read it — on a stock Mac that's `staff`, i.e. every local account. A kid could use it to publish their own `minutes_today` as 0. A broker ACL limits what it can reach, so use one (see below), but it can't stop that.
+- **Fail-safe covers only "never heard from HA".** Old agent: `fail_mode` plus `offline_grace_period_seconds`. Root daemon: `root_daemon_fail_mode` (`safe`/`open`/`grace`) applies only until the first `allowed` value arrives; after that it keeps enforcing the last value through an outage.
+- `managed_users` controls which macOS accounts are tracked; broker ACLs should still scope what each machine's credential can publish.
+- Rapid relogin protection is on by default: if a blocked child unlocks the session 4 times within 60 seconds, it warns on attempt 3 and shuts the Mac down on attempt 4.
 
 ## Troubleshooting
 
 | Symptom | Checks |
 |---------|--------|
-| Agent does not start | `launchctl print gui/<uid> com.ha.screen-agent`; inspect `~/Library/Logs/ha-screen-agent/agent.err.log`. |
+| Root daemon not running | `sudo launchctl list \| grep com.ha.screen-daemon` (no PID = not running); `sudo tail -50 /var/log/root_daemon_skeleton.log`; crash output before logging starts goes to `/var/log/ha-screen-daemon.err.log`. |
+| No voice warnings | The helper runs per kid session: check `~/Library/Logs/ha-user-voice-helper/helper.log` in that kid's home. Budget/bonus warnings also need the daemon to be receiving the budget number, so check the broker ACL allows its `homeassistant/<child>_<device_id>_mac/+/state` subscription. |
+| Root daemon entities missing in HA | Kid's `managed_users` entry has no `topic_prefix` (skipped entirely), or the broker ACL denies `homeassistant/+/+/config` writes (discovery silently rejected — connection still looks fine). |
+| Old agent does not start | `launchctl print gui/<uid> com.ha.screen-agent`; inspect `~/Library/Logs/ha-screen-agent/agent.err.log`. |
 | Minutes not updating in HA | Confirm MQTT topics via `mosquitto_sub` and broker ACLs allow publishing. |
 | Mac never unlocks after MQTT outage | Verify `offline_grace_period_seconds`, network reachability, and retained `allowed=1`. |
 | Child can still use Mac when blocked | Ensure HA publishes retained `allowed=0`, LaunchAgent is running, and enforcement mode is set correctly. |
 | Mac shuts down after repeated blocked relogins | This is expected when rapid relogin protection is enabled. Tune `rapid_relogin_*` settings if the window or threshold is too aggressive. |
 
 ### Harder lockouts (when logout prompts appear)
+
+Mostly relevant to the **old agent**; the root daemon only ever locks, and handles fast user switching itself (a backgrounded session pauses, and whoever becomes the console user while blocked gets locked), so don't disable fast user switching for it. The password-after-sleep setting below **is required** for the root daemon too, since its lock is a display sleep.
 
 macOS shows a cancelable confirmation dialog when users are logged out, so a determined child can dodge `enforcement_mode=logout`. To make the block harder to bypass:
 

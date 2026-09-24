@@ -6,29 +6,36 @@
 # publish their own discovery configs for every entity a managed kid
 # needs, the moment they connect:
 #
-#   <child> Mac Minutes            sensor            e.g. sensor.kiddo_mac_minutes
-#   <child> Mac Active              binary_sensor     e.g. binary_sensor.kiddo_mac_active
-#   <child> Mac Allowed              switch (parent-settable)   e.g. switch.kiddo_mac_allowed
-#   <child> Mac Daily Budget (min)   number (parent-settable)   e.g. number.kiddo_mac_daily_budget_min
-#   <child> Mac Parent Override      switch (parent-settable)   e.g. switch.kiddo_mac_parent_override
-#   <child> Mac Session State        sensor — root daemon only   active/locked/backgrounded/offline
+#   <child> Mac Minutes              sensor
+#   <child> Mac Active               binary_sensor
+#   <child> Mac Agent Online         binary_sensor
+#   <child> Mac Allowed              switch (parent-settable)
+#   <child> Mac Daily Budget (min)   number (parent-settable)
+#   <child> Mac Parent Override      switch (parent-settable)
+#   <child> Mac Session State        sensor — root daemon only (active/locked/backgrounded/offline)
 #   <child> Mac Bonus Minutes        number (parent-settable) — root daemon only
 #   <child> Mac Max Bonus Minutes    number (parent-settable) — root daemon only
 #
-# These all appear automatically under Settings -> Devices & Services ->
-# MQTT once the agent/daemon is running and connected. Defining your own
-# versions of them here (input_number, input_boolean, or a manual mqtt:
-# sensor:/binary_sensor: block) creates a SEPARATE set of entities that
-# looks similar but that the agent/daemon never reads from or writes to
-# — editing them does nothing. Exact entity_ids can vary slightly by HA
-# version; confirm the real ones on each kid's Mac device page rather
-# than assuming the examples above are exact.
+# All of them are per kid PER MAC, grouped under one HA device named
+# "<child> mac (<friendly name or device_id>)". They appear automatically
+# under Settings -> Devices & Services -> MQTT once the agent/daemon is
+# running and connected. Defining your own versions of them here
+# (input_number, input_boolean, or a manual mqtt: sensor:/binary_sensor:
+# block) creates a SEPARATE set of entities the agent/daemon never reads
+# from or writes to — editing them does nothing.
+#
+# Don't guess entity_ids from these names. HA builds them from the device
+# name AND the entity name, and on real installs they came out like
+# sensor.screentime_cj_mac_screentime_cj_mac_minutes. Look them up under
+# Developer Tools -> States (search the kid's name), or just use the
+# blueprints' entity pickers.
 #
 # The only thing you actually add by hand is the automations that DRIVE
 # `allowed` from those entities. Don't hand-write these either — import
 # the blueprints from ../homeassistant/blueprints/ instead:
-#   - kid_mac_budget_enforcement.yaml — one automation PER managed kid
-#     (compares that kid's own minutes against their own budget).
+#   - kid_mac_budget_enforcement.yaml — one automation PER managed kid,
+#     only if each kid uses ONE Mac (compares that Mac's minutes against
+#     its budget). Kids on several Macs: use the combined one below.
 #   - kid_mac_daily_reset.yaml — ONE automation total, covering every
 #     managed kid at once (just resets values, no per-kid logic needed).
 #
@@ -40,23 +47,24 @@
 # Optional: ONE combined budget across multiple Macs, instead of a
 # separate budget per machine
 # ---------------------------------------------------------------------
-# By default (kid_mac_budget_enforcement.yaml), a kid's minutes and
-# budget are tracked PER MAC — minutes_today and daily_budget both
-# include device_id in their topic. That's correct for a household that
-# WANTS separate per-machine limits. It's wrong for one that doesn't: a
-# kid with a 60-minute budget on two Macs effectively gets 120 minutes,
-# since each machine enforces its own budget independently even though
-# the `allowed` switch they both obey is shared.
+# A kid's minutes and daily_budget are tracked PER MAC (both topics
+# include device_id), but the `allowed` topic every Mac obeys is per KID.
+# So one kid_mac_budget_enforcement.yaml instance per Mac for the same kid
+# don't give separate per-Mac budgets — they fight over the shared topic:
+# going over budget on one Mac locks every Mac, and the next minute tick on
+# a Mac with budget left unlocks them all again.
 #
-# If you want one real combined total instead, use
-# kid_mac_budget_enforcement_combined.yaml — but it needs two pieces of
+# For a kid on several Macs, use kid_mac_budget_enforcement_combined.yaml
+# instead: one combined total against one shared budget. It needs two pieces of
 # actual hand-written YAML first, since a blueprint can only define
 # automations, not sensors or helpers:
 #
 # 1. A template sensor per kid, summing their minutes-today sensor
-#    across every Mac they use (adjust the entity_ids to your real
-#    ones — these are illustrative, same caveat as everywhere else in
-#    this file):
+#    across every Mac they use. The entity_ids below are placeholders —
+#    replace each with the kid's real minutes sensor on that Mac from
+#    Developer Tools -> States (they won't look like these), and add a
+#    line whenever a new Mac is added. Test it first in Developer Tools ->
+#    Template before creating the sensor:
 #
 #    template:
 #      - sensor:
@@ -92,5 +100,10 @@
 # With both of those in place, create ONE automation per kid (not per
 # kid-per-machine) from kid_mac_budget_enforcement_combined.yaml,
 # pointing it at the template sensor and input_number above instead of
-# any single Mac's own entities. The two blueprints aren't meant to be
-# mixed for the same kid — pick one model per kid, not both.
+# any single Mac's own entities, and at every Mac's Parent Override switch
+# for that kid. The two blueprints aren't meant to be mixed for the same kid.
+#
+# Neither blueprint counts Bonus Minutes yet — they compare against the
+# base budget only, even though the root daemon announces base + bonus as
+# the kid's total. Until that's fixed, raise the budget instead of
+# granting bonus.

@@ -627,6 +627,7 @@ fi
 
 # --- Blueprint delivery ---------------------------------------------------
 BUDGET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
+COMBINED_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement_combined.yaml"
 RESET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_daily_reset.yaml"
 
 # HA's Import Blueprint dialog only accepts a URL, not pasted YAML — so
@@ -650,16 +651,19 @@ case "$REMOTE_URL" in
 esac
 
 echo ""
-echo "Import both blueprints in HA: Settings > Automations & Scenes >"
-echo "Blueprints > Import Blueprint. Budget enforcement needs one"
-echo "automation PER managed kid (different entities/comparison per kid);"
-echo "daily reset needs only ONE automation total, listing every kid's"
-echo "entities in its 3 inputs."
+echo "Import blueprints in HA: Settings > Automations & Scenes >"
+echo "Blueprints > Import Blueprint. Pick ONE budget blueprint per kid:"
+echo "  - per-Mac budget: only if the kid uses a single Mac"
+echo "  - combined: kid uses several Macs (needs a template sensor and an"
+echo "    input_number helper first, see homeassistant/configuration.yaml)"
+echo "Either way, one budget automation per kid. Daily reset needs only ONE"
+echo "automation total, listing every kid's entities in its 3 inputs."
 echo ""
 if [[ -n "$RAW_BASE" ]]; then
     echo "Paste these URLs into the Import Blueprint dialog (requires this"
     echo "repo to be public on GitHub):"
-    echo "  Budget enforcement: ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
+    echo "  Budget, per Mac:    ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
+    echo "  Budget, combined:   ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement_combined.yaml"
     echo "  Daily reset:        ${RAW_BASE}/homeassistant/blueprints/kid_mac_daily_reset.yaml"
     echo ""
     echo "If this repo is private instead, skip the URL import and place the"
@@ -669,6 +673,7 @@ else
     echo "repo to a public GitHub repo and use Import Blueprint with its raw"
     echo "URL, or place these files directly on the HA filesystem instead:"
     echo "  $BUDGET_BLUEPRINT"
+    echo "  $COMBINED_BLUEPRINT"
     echo "  $RESET_BLUEPRINT"
     echo "under <HA config>/blueprints/automation/ — see README for details."
 fi
@@ -686,11 +691,12 @@ Next steps:
   1. Confirm config values (managed_users, device_id, MQTT credentials,
      fail mode) are correct in $CONFIG_PATH — full reference in
      config/CONFIG_REFERENCE.md.
-  2. In Home Assistant, import the two blueprints above: one budget
-     enforcement automation per managed kid, but only one daily reset
-     automation total (it lists every kid's entities at once).
-  3. Confirm the daemon is running:
-       log show --predicate 'process == "python3"' --last 5m | grep ha-screen-daemon
+  2. In Home Assistant, import the blueprints above: one budget
+     automation per kid (per-Mac or combined, see above), and one daily
+     reset automation total. Rename each automation after creating it.
+  3. Confirm the daemon is running (a PID means running):
+       sudo launchctl list | grep com.ha.screen-daemon
+       sudo tail -50 /var/log/root_daemon_skeleton.log
   4. Toggle the 'allowed' switch in Home Assistant to confirm enforcement.
   5. To remove everything cleanly later, run: sudo ./scripts/uninstall.sh
 ------------------------------------------------------------
