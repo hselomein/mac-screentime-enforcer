@@ -625,6 +625,80 @@ else
     echo "No 'managed_users' configured. Voice helper installed but not bootstrapped for anyone yet."
 fi
 
+# --- Mosquitto ACL snippet -------------------------------------------------
+# Generated, not hand-written: every past ACL block for this project was
+# manually derived in conversation and got real details wrong more than
+# once (device_id, child_name typos). This computes it directly from what
+# THIS install actually has in config.json, so it can't drift from reality
+# the way a hand-written one did.
+#
+# Only grants what the daemon actually uses (same "only what's used"
+# discipline as the rest of this project's ACL work) — notably does NOT
+# grant anything on .../override/state, since the daemon never reads or
+# writes that topic itself, only publishes its discovery config (already
+# covered by the broad homeassistant/+/+/config grant below).
+ACL_SNIPPET="$(
+    CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
+import json, os
+
+def sanitize_device_id(value):
+    s = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(value).lower())
+    return s or "mac"
+
+with open(os.environ["CONFIG_PATH"]) as fh:
+    data = json.load(fh)
+
+device_id = sanitize_device_id(data.get("device_id", ""))
+mqtt_user = (data.get("mqtt_username") or "").strip() or "<SET mqtt_username IN config.json FIRST>"
+
+lines = [f"user {mqtt_user}", ""]
+for entry in data.get("managed_users") or []:
+    child = (entry.get("child_name") or "").strip()
+    if not child:
+        continue
+    lines.append(f"# --- {child} on this machine ---")
+    lines.append(f"topic readwrite screen/{child}/mac/{device_id}/#")
+    lines.append(f"topic read screen/{child}/allowed")
+    lines.append(f"topic read screen/{child}/mac/+/minutes_today")
+    lines.append(f"topic write screen/{child}/total_minutes_today")
+    lines.append(f"topic read homeassistant/{child}_shared/+/state")
+    lines.append("")
+lines.append("topic write homeassistant/+/+/config")
+print("\n".join(lines))
+PY
+)"
+
+ACL_SNIPPET_PATH="$AGENT_DIR/mosquitto_acl_snippet.txt"
+printf '%s\n' "$ACL_SNIPPET" > "$ACL_SNIPPET_PATH"
+chmod 0644 "$ACL_SNIPPET_PATH"
+
+echo ""
+echo "Add this to your Mosquitto broker's ACL file (all 3 Macs share ONE"
+echo "accesscontrollist — this is only this machine's block, append it,"
+echo "don't replace the file):"
+echo "------------------------------------------------------------"
+printf '%s\n' "$ACL_SNIPPET"
+echo "------------------------------------------------------------"
+echo "Saved for later at: $ACL_SNIPPET_PATH"
+
+# Best-effort clipboard copy. Root has no GUI session of its own — same
+# class of problem this project already hit with pmset (fixed by
+# targeting the console user via launchctl asuser) and with audio (asuser
+# wasn't even enough there, needed a whole companion agent). Unconfirmed
+# whether asuser is sufficient for pbcopy specifically — attempted, not
+# guaranteed; the screen output and saved file above are the reliable
+# fallback either way, so a failure here is silent and non-fatal.
+CONSOLE_USER="$(stat -f%Su /dev/console 2>/dev/null || true)"
+if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
+    CONSOLE_UID="$(id -u "$CONSOLE_USER" 2>/dev/null || true)"
+    if [[ -n "$CONSOLE_UID" ]]; then
+        if printf '%s\n' "$ACL_SNIPPET" | launchctl asuser "$CONSOLE_UID" pbcopy >/dev/null 2>&1; then
+            echo "(Also attempted to copy this to your clipboard — check with Cmd-V;"
+            echo " if it's not there, use the printed text or saved file above.)"
+        fi
+    fi
+fi
+
 # --- Blueprint delivery ---------------------------------------------------
 BUDGET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
 COMBINED_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement_combined.yaml"
