@@ -508,7 +508,7 @@ def _parse_minutes_payload(raw: bytes) -> tuple[Optional[int], Optional[str]]:
         except (TypeError, ValueError):
             return None, None
     if isinstance(data, (int, float)):
-        return int(data), None  # bare number from an older daemon: date unknown
+        return int(data), None  # bare number from an older install: no date, so never counted
     return None, None
 
 
@@ -1344,14 +1344,16 @@ def main() -> None:
         """This Mac's own minutes (from UsageState, always current) plus
         every OTHER Mac's latest report for today. Skips this Mac's own echo
         from the wildcard, and any sibling value dated a different day (a
-        Mac asleep or off at midnight). A bare-number value from an older
-        daemon has no date and is counted as-is."""
+        Mac asleep or off at midnight). A bare-number value has no date: it
+        can only be a leftover retained by an older install (every current
+        daemon sends a date), so it's skipped too — seen for real, a stale
+        device_id's old value inflated a kid's total."""
         today = usage_states[child].date
         total = usage_states[child].minutes_today()
         for device, (minutes, date) in sibling_minutes.get(child, {}).items():
             if device == mqtt_config.device_id:
                 continue
-            if date is not None and date != today:
+            if date != today:
                 continue
             total += minutes
         return total
