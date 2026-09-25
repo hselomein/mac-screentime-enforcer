@@ -678,6 +678,83 @@ else
     echo "under <HA config>/blueprints/automation/ — see README for details."
 fi
 
+# --- Home Assistant setup checklist ----------------------------------------
+# Everything that has to be created BY HAND in HA, filled in with this
+# install's real kid names so nothing needs looking up. The template sensor
+# matches on each sensor's full friendly_name ("<device name> <child> Mac
+# Minutes"), confirmed on real hardware, so it sums the kid's minutes across
+# every Mac with no entity_ids to find — and picks up a new Mac by itself.
+# Depends only on kid names, not on this Mac, so every Mac prints the same
+# list: do it once per household, not once per Mac.
+HA_CHECKLIST="$(
+    CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
+import json, os
+with open(os.environ["CONFIG_PATH"]) as fh:
+    data = json.load(fh)
+kids = []
+for e in data.get("managed_users") or []:
+    child = (e.get("child_name") or "").strip()
+    if child:
+        prefix = (e.get("topic_prefix") or f"screen/{child}").rstrip("/")
+        kids.append((child, prefix))
+
+out = []
+out.append("Do this ONCE for the household (every Mac prints the same list).")
+out.append("Uses the COMBINED budget blueprint (right when kids use more than one Mac).")
+out.append("")
+for n, (child, prefix) in enumerate(kids, 1):
+    out.append(f"=== Kid {n}: {child} ===")
+    out.append("A. Template sensor: Settings > Devices & Services > Helpers >")
+    out.append("   Create Helper > Template > Template a sensor")
+    out.append(f"     Name:                {child} Total Minutes Today")
+    out.append("     Unit of measurement: min")
+    out.append("     State template (paste as-is):")
+    out.append("{{ states.sensor")
+    out.append(f"   | selectattr('attributes.friendly_name', 'search', ' {child} Mac Minutes$')")
+    out.append("   | map(attribute='state') | map('int', 0) | sum }}")
+    out.append("B. Budget number: Create Helper > Number")
+    out.append(f"     Name: {child} Daily Budget   Min 0  Max 600  Step 5  Unit min  Display mode: input field")
+    out.append(f"     Then set it to {child}'s real daily budget.")
+    out.append("C. Automation: Create Automation > Use blueprint >")
+    out.append("   Kid Mac Budget Enforcement (Combined Total)")
+    out.append(f"     Combined Minutes Sensor:  {child} Total Minutes Today   (from A)")
+    out.append(f"     Shared Daily Budget:      {child} Daily Budget          (from B)")
+    out.append(f"     Parent Override Switches: '{child} Mac Parent Override' from EVERY Mac")
+    out.append(f"     Allowed MQTT Topic:       {prefix}/allowed")
+    out.append(f"     Save, then rename the automation to '{child} Budget Enforcement'")
+    out.append("     (the blueprint's name field doesn't stick).")
+    out.append("")
+out.append("=== Once, for all kids: daily reset ===")
+out.append("Create Automation > Use blueprint > Kid Mac Daily Reset (all kids)")
+out.append("  Allowed Switches:          every '<kid> Mac Allowed', every kid, every Mac")
+out.append("  Parent Override Switches:  every '<kid> Mac Parent Override', every kid, every Mac")
+out.append("  Bonus Minutes Numbers:     every '<kid> Mac Bonus Minutes', every kid, every Mac")
+out.append("")
+out.append("=== Also, after the first install ===")
+out.append("- Flip each Parent Override switch on and off once, so its state is saved.")
+out.append("")
+out.append("Current limitations to know about:")
+out.append("- Bonus minutes are NOT counted by the budget automation; raise the")
+out.append("  Daily Budget helper instead of granting bonus.")
+out.append("- The Mac's own voice warnings (budget set, 15/10/5/1 minutes left) read")
+out.append("  that Mac's own '<kid> Mac Daily Budget (min)' number and count only that")
+out.append("  Mac's minutes, not the combined total. Set each Mac's number to the same")
+out.append("  value as the shared helper if you want warnings; leave it unset for none.")
+print("\n".join(out))
+PY
+)"
+HA_CHECKLIST_PATH="$AGENT_DIR/ha_setup_checklist.txt"
+printf '%s\n' "$HA_CHECKLIST" > "$HA_CHECKLIST_PATH"
+chmod 0644 "$HA_CHECKLIST_PATH"
+
+echo ""
+echo "============================================================"
+echo "HOME ASSISTANT SETUP — exactly what to create by hand"
+echo "============================================================"
+printf '%s\n' "$HA_CHECKLIST"
+echo "------------------------------------------------------------"
+echo "Saved for later at: $HA_CHECKLIST_PATH"
+
 cat <<EOF
 
 ------------------------------------------------------------

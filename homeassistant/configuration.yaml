@@ -59,27 +59,24 @@
 # actual hand-written YAML first, since a blueprint can only define
 # automations, not sensors or helpers:
 #
-# 1. A template sensor per kid, summing their minutes-today sensor
-#    across every Mac they use. The entity_ids below are placeholders —
-#    replace each with the kid's real minutes sensor on that Mac from
-#    Developer Tools -> States (they won't look like these), and add a
-#    line whenever a new Mac is added. Test it first in Developer Tools ->
-#    Template before creating the sensor:
+# The installer prints an exact, filled-in version of everything below and
+# saves it to /Library/Application Support/ha-screen-agent/ha_setup_checklist.txt
+# — use that; this is just the explanation.
 #
-#    template:
-#      - sensor:
-#          - name: "Kiddo Total Minutes Today"
-#            unique_id: kiddo_total_minutes_today
-#            unit_of_measurement: min
-#            state: >-
-#              {{ (states('sensor.kiddo_mac1_minutes') | int(0))
-#                 + (states('sensor.kiddo_mac2_minutes') | int(0))
-#                 + (states('sensor.kiddo_mac3_minutes') | int(0)) }}
+# 1. A template sensor per kid, summing their minutes-today sensor across
+#    every Mac they use. Matches on each sensor's full display name
+#    ("<device name> <child> Mac Minutes", confirmed on real hardware), so
+#    no entity_ids need looking up and a new Mac is picked up
+#    automatically. Easiest via Helpers -> Create Helper -> Template ->
+#    Template a sensor, pasting (for a kid named kiddo):
 #
-#    int(0) as the default matters: if a Mac is asleep/offline, its
-#    sensor can briefly read "unknown" — without a default, the whole
-#    template errors out instead of just treating that Mac as 0 for the
-#    moment.
+#      {{ states.sensor
+#         | selectattr('attributes.friendly_name', 'search', ' kiddo Mac Minutes$')
+#         | map(attribute='state') | map('int', 0) | sum }}
+#
+#    The leading space stops e.g. "xkiddo" from matching too. int(0) means
+#    a Mac reading "unknown" (asleep/offline) counts as 0 instead of
+#    breaking the whole sum.
 #
 # 2. An input_number helper per kid, standing in for the single shared
 #    daily budget (instead of each Mac's own per-device number entity).

@@ -157,9 +157,24 @@ unlocks them all again. It does **not** give separate per-Mac budgets.
 **Kid uses more than one Mac?** Use
 `kid_mac_budget_enforcement_combined.yaml` instead, one automation per kid:
 it compares the kid's minutes summed across every Mac against one shared
-budget. It needs a template sensor and an `input_number` helper set up by
-hand first — see "Optional: ONE combined budget across multiple Macs" in
-[`homeassistant/configuration.yaml`](homeassistant/configuration.yaml).
+budget.
+
+### What you create by hand in Home Assistant
+
+MQTT discovery creates every Mac-side entity automatically. What it can't
+create is anything spanning several Macs, so for the combined model you
+make, **once per household** (not once per Mac):
+- per kid: a **template sensor** summing that kid's minutes across every
+  Mac, a **Number helper** for their shared daily budget, and one
+  **automation** from the combined blueprint;
+- once: the **daily reset** automation.
+
+**`install_root_daemon.sh` prints this as an exact checklist with your
+kids' names already filled in**, including the template to paste, and saves
+it to `/Library/Application Support/ha-screen-agent/ha_setup_checklist.txt`.
+Follow that instead of working from the examples here. The template matches
+each sensor's full display name, so nothing needs looking up and a new Mac
+is picked up automatically.
 
 For reference, this is the underlying automation each blueprint-created
 instance is equivalent to (with `!input` values filled in for one kid):
