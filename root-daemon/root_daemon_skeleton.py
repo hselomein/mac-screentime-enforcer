@@ -624,8 +624,37 @@ def resolve_allowed(
     return elapsed_minutes < fail_grace_minutes
 
 
-def lock_session(uid: int, expected_mac_user: str) -> bool:
+def lock_command_topic(topic_prefix: str, device_id: str) -> str:
+    """Tells the kid's voice helper to lock its own session (not retained —
+    a retained lock would re-fire every time the helper reconnects)."""
+    return f"{topic_prefix}/mac/{device_id}/lock_command"
+
+
+# How long to wait for the voice helper's in-session lock to show up before
+# falling back to display sleep.
+HELPER_LOCK_WAIT_SECONDS = 1.5
+
+
+def lock_session(
+    uid: int,
+    expected_mac_user: str,
+    mqtt_client: Optional[mqtt.Client] = None,
+    topic_prefix: Optional[str] = None,
+    device_id: Optional[str] = None,
+) -> bool:
     """
+    PRIMARY MECHANISM (added 2026-09-25): ask the kid's voice helper, which
+    runs inside their own session, to lock it with SACLockScreenImmediate
+    (login.framework — what the menu's Lock Screen command uses). That's a
+    real lock whatever the account's "require password after sleep" setting
+    is, and needs no Accessibility permission since it isn't crossing from
+    root into the session (confirmed working on Tahoe 2026-09-25). Found
+    necessary for real: on an account without that setting, the display-
+    sleep fallback below just blanked the screen with no password prompt.
+    If the helper isn't running (or a kid killed it), the lock doesn't show
+    up within HELPER_LOCK_WAIT_SECONDS and the fallback runs.
+
+    FALLBACK, the original mechanism:
     Locks the console session belonging to `uid`, from this process
     (root, no GUI session of its own) — via `launchctl asuser`, the
     standard mechanism for a privileged process to act inside a specific
@@ -681,6 +710,26 @@ def lock_session(uid: int, expected_mac_user: str) -> bool:
             current,
         )
         return False
+
+    if mqtt_client is not None and topic_prefix and device_id:
+        mqtt_client.publish(
+            lock_command_topic(topic_prefix, device_id), payload="lock", qos=1, retain=False
+        )
+        deadline = time.monotonic() + HELPER_LOCK_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(0.25)
+            if is_screen_locked():
+                logger.info("Locked uid %d via the in-session helper.", uid)
+                return True
+        logger.warning(
+            "In-session helper didn't lock uid %d in time — falling back to "
+            "display sleep (only a real lock if the account requires its "
+            "password immediately after sleep).",
+            uid,
+        )
+        # Re-check: the console may have switched while we waited.
+        if get_console_user() != expected_mac_user:
+            return False
 
     try:
         subprocess.run(
@@ -1668,7 +1717,13 @@ def main() -> None:
                                 allowed_state.get(enforced_child),
                                 mqtt_config.fail_mode,
                             )
-                            lock_session(uid, expected_mac_user=current_user)
+                            lock_session(
+                                uid,
+                                expected_mac_user=current_user,
+                                mqtt_client=mqtt_client,
+                                topic_prefix=registry.topic_prefix_for(enforced_child),
+                                device_id=mqtt_config.device_id,
+                            )
 
             # Minute accumulation — persisted per kid (see UsageState), resets
             # at local midnight.

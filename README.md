@@ -8,7 +8,7 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
 ## What you get
 
 - **Local tracking**: minutes count only while the kid is the console user and the screen is unlocked; a backgrounded (fast-user-switched) or locked session pauses. The old agent also pauses after `idle_timeout_seconds` of no input; **the root daemon has no idle detection yet**, so a kid who walks away unlocked keeps accruing time.
-- **Enforcement**: when HA publishes `allowed=0`, the root daemon locks the screen (`pmset displaysleepnow`); the old agent locks or logs out. Both escalate repeated unlock attempts to a shutdown (rapid-relogin protection).
+- **Enforcement**: when HA publishes `allowed=0`, the root daemon locks the screen: its per-user helper, running inside the kid's session, triggers the real Lock Screen (a password is always required), with display sleep (`pmset displaysleepnow`) as a fallback if the helper isn't running; the old agent locks or logs out. Both escalate repeated unlock attempts to a shutdown (rapid-relogin protection).
 - **MQTT discovery & telemetry**: entities appear in HA automatically. Root daemon: one device per kid (allowed, daily budget, bonus minutes, max bonus minutes, parent override, and total minutes today summed across every Mac) plus one per kid per Mac (minutes, active, online, session state). The old agent adds a JSON heartbeat and an optional active-app sensor, and has no session-state or bonus entities.
 - **Voice warnings** (root daemon, via a per-user helper): budget set/changed, bonus granted, 15/10/5/1 minutes left, and rapid-relogin warnings.
 - **Fail-safe when HA has never answered**: see `fail_mode` in [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md). Once the root daemon has received an `allowed` value it keeps enforcing that last value through a later MQTT outage.
@@ -294,7 +294,7 @@ separate credentials per kid.
 
 ### Harder lockouts (when logout prompts appear)
 
-Mostly relevant to the **old agent**; the root daemon only ever locks, and handles fast user switching itself (a backgrounded session pauses, and whoever becomes the console user while blocked gets locked), so don't disable fast user switching for it. The password-after-sleep setting below **is required** for the root daemon too, since its lock is a display sleep.
+Mostly relevant to the **old agent**; the root daemon only ever locks, and handles fast user switching itself (a backgrounded session pauses, and whoever becomes the console user while blocked gets locked), so don't disable fast user switching for it. The password-after-sleep setting below is still **recommended** for the root daemon: its normal lock always requires the password, but its fallback (used only if the kid's per-user helper isn't running) is a display sleep, which is a real lock only with that setting on. On macOS 26 it's under **System Settings → Lock Screen → Require password after screen saver begins or display is turned off**, set per account while logged in as the kid.
 
 macOS shows a cancelable confirmation dialog when users are logged out, so a determined child can dodge `enforcement_mode=logout`. To make the block harder to bypass:
 
