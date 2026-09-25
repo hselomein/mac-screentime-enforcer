@@ -329,6 +329,19 @@ class ManagedUserRegistry:
             len(self._by_mac_user),
             list(self._by_mac_user.keys()),
         )
+        # A prefix that doesn't match the kid's name still "works" but talks
+        # on topics HA never uses, so the kid silently goes unenforced — hit
+        # for real after fixing a child_name typo but not its topic_prefix.
+        for child, entry in self._by_child.items():
+            prefix = (entry.get("topic_prefix") or "").rstrip("/")
+            if prefix and not (
+                prefix == f"screen/{child}" or prefix.startswith(f"screen/{child}/")
+            ):
+                logger.warning(
+                    "topic_prefix %r for '%s' doesn't start with 'screen/%s' — "
+                    "this kid's topics won't match HA's. Fix it in config.json.",
+                    prefix, child, child,
+                )
 
     def child_for(self, mac_user: str) -> Optional[str]:
         entry = self._by_mac_user.get(mac_user)

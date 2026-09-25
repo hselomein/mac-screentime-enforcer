@@ -656,11 +656,17 @@ for entry in data.get("managed_users") or []:
     child = (entry.get("child_name") or "").strip()
     if not child:
         continue
+    # Built from the same topic_prefix the daemon uses, so the ACL can never
+    # quietly disagree with what the daemon actually publishes/subscribes.
+    prefix = (entry.get("topic_prefix") or f"screen/{child}").strip().rstrip("/")
     lines.append(f"# --- {child} on this machine ---")
-    lines.append(f"topic readwrite screen/{child}/mac/{device_id}/#")
-    lines.append(f"topic read screen/{child}/allowed")
-    lines.append(f"topic read screen/{child}/mac/+/minutes_today")
-    lines.append(f"topic write screen/{child}/total_minutes_today")
+    if not (prefix == f"screen/{child}" or prefix.startswith(f"screen/{child}/")):
+        lines.append(f"# !! WARNING: topic_prefix '{prefix}' doesn't match child_name '{child}'.")
+        lines.append("# !! HA won't see this kid. Fix topic_prefix in config.json and rerun.")
+    lines.append(f"topic readwrite {prefix}/mac/{device_id}/#")
+    lines.append(f"topic read {prefix}/allowed")
+    lines.append(f"topic read {prefix}/mac/+/minutes_today")
+    lines.append(f"topic write {prefix}/total_minutes_today")
     lines.append(f"topic read homeassistant/{child}_shared/+/state")
     lines.append("")
 lines.append("topic write homeassistant/+/+/config")
