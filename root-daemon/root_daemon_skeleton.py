@@ -934,7 +934,7 @@ def minutes_wildcard_topic(topic_prefix: str) -> str:
     return f"{topic_prefix}/mac/+/minutes_today"
 
 
-ROOT_DAEMON_VERSION = "0.2.1"
+ROOT_DAEMON_VERSION = "0.2.2"
 
 
 def _discovery_device(
