@@ -33,8 +33,9 @@
 # file had on that whole subtree.
 #
 # IMPORTANT WILDCARD LIMITATION, worth understanding before editing this:
-# discovery CONFIG topics look like `homeassistant/<domain>/<child>_<device_id>_mac_<field>/config`
-# — child, device_id, and the field name are all concatenated into ONE
+# discovery CONFIG topics look like `homeassistant/<domain>/<child>_<device_id>_<field>/config`
+# (per Mac) or `homeassistant/<domain>/<child>_shared_<field>/config` (per
+# kid) — child, device_id, and the field name are all concatenated into ONE
 # topic level (no slashes between them), not separate levels. MQTT's `+`
 # wildcard only matches a WHOLE topic level, so there is no clean pattern
 # that means "any field, but only for this specific child+device" — you
@@ -57,17 +58,18 @@
 # matching this Mac's own sanitized device_id). Repeat the block below
 # once per kid this specific machine's config.json lists in managed_users.
 #
-# Shared entities (allowed, daily_budget, bonus_minutes, max_bonus_minutes,
-# budget_model) now live under `homeassistant/<child>_shared/...` — no
+# Shared entities (daily_budget, bonus_minutes, max_bonus_minutes,
+# parent override) have their state under `homeassistant/<child>_shared/...` — no
 # device_id in that path at all, since every Mac managing a kid publishes
 # identical discovery for these and they're meant to converge to ONE HA
 # entity per kid, not one per machine. Per-machine entities (minutes,
-# active, online, session_state) are unaffected, still under
-# `homeassistant/<child>_<device_id>_mac_.../` via the broad discovery
-# grant at the bottom. No grant for `.../override/state` here — the root
-# daemon never reads or writes that topic itself (override is purely an
-# HA/automation-side concept), only publishes its discovery config, which
-# the broad `homeassistant/+/+/config` grant already covers.
+# active, online, session_state) publish their state under
+# `screen/<child>/mac/<device_id>/...`, and their discovery configs via the
+# broad grant at the bottom. The root daemon never reads or writes
+# `.../override/state` itself (override is purely an HA/automation-side
+# concept); the `+/state` read below happens to cover it, harmlessly. The
+# same broad config grant also lets the daemon clear the discovery configs
+# of the older per-Mac entity scheme (an empty retained publish).
 
 user screentime_macbookprom1
 
@@ -85,7 +87,7 @@ topic read screen/cj/allowed
 # advance), and publish the combined total this daemon computes from them.
 topic read screen/cj/mac/+/minutes_today
 topic write screen/cj/total_minutes_today
-# daily_budget / bonus_minutes / max_bonus_minutes / budget_model — read
+# daily_budget / bonus_minutes / max_bonus_minutes — read
 # only, see the note above on why write is deliberately not granted.
 # Shared across every Mac this kid uses, not scoped to this one device.
 topic read homeassistant/cj_shared/+/state

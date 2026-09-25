@@ -28,9 +28,8 @@ blueprint:
     allowed_switches:
       name: Allowed Switches
       description: >-
-        Every "<child> Mac Allowed" switch — every kid, on every Mac (one
-        per kid per Mac). Search the kid's name in the picker; don't guess
-        the entity_ids, HA builds them from the device name too.
+        Every kid's "Allowed" switch (one per kid, on the kid's own
+        device). Pick all of them.
       selector:
         entity:
           domain: switch
@@ -38,7 +37,7 @@ blueprint:
     parent_override_switches:
       name: Parent Override Switches
       description: >-
-        Every "<child> Mac Parent Override" switch — every kid, on every Mac.
+        Every kid's "Parent Override" switch (one per kid).
       selector:
         entity:
           domain: switch
@@ -46,8 +45,8 @@ blueprint:
     bonus_minutes_entities:
       name: Bonus Minutes Numbers
       description: >-
-        Every "<child> Mac Bonus Minutes" number — every kid, on every Mac
-        — each one reset to 0 here. Do NOT include any Max Bonus Minutes
+        Every kid's "Bonus Minutes" number (one per kid) — each one reset
+        to 0 here. Do NOT include any Max Bonus Minutes
         entity in this list; that one's a standing cap, not a daily
         value, and this blueprint never touches it.
       selector:

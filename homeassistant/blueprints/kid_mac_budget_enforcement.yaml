@@ -1,84 +1,80 @@
 blueprint:
   name: Kid Mac Budget Enforcement
   description: >-
-    Publishes allowed=0/1 based on minutes vs daily budget for one managed
-    kid's Mac, retained. Skips enforcement while that kid's Parent Override
-    switch is on.
+    Blocks one kid on every Mac once their screen time for today reaches
+    their daily budget plus any bonus (capped at their max bonus), and
+    unblocks them when it's back under — for example after a parent raises
+    the budget or grants bonus. Does nothing while the kid's Parent Override
+    is on, and nothing until their Daily Budget has been set.
 
-    Re-evaluates on BOTH the minutes sensor changing AND the daily budget
-    number changing — not just minutes. That second trigger matters: without
-    it, increasing a kid's budget while they're already locked out (and so
-    no longer accruing minutes) would never re-publish `allowed`, since
-    nothing would be left to trigger the automation. Confirmed as a real gap
-    in an earlier example that only triggered on minutes; fixed here.
+    Everything it needs is created automatically by the Macs. Each kid has
+    a device named after them holding Total Minutes Today (summed across
+    every Mac), Daily Budget, Bonus Minutes, Max Bonus Minutes and Parent
+    Override.
 
-    Import this blueprint once, then create one automation per managed kid
-    from it, pointing the inputs at that kid's own entities/topic.
-
-    Only use this if each kid uses ONE Mac. The allowed topic is per kid,
-    not per Mac, so separate instances for the same kid on different Macs
-    overwrite each other instead of giving per-Mac budgets. For a kid on
-    several Macs, use kid_mac_budget_enforcement_combined.yaml.
-
-    Known limitations: Bonus Minutes aren't counted (it compares against
-    the base budget only, though the root daemon announces base + bonus),
-    and minutes exactly equal to the budget publish nothing until the next
-    minute.
+    Import once, then create one automation per kid and rename it after
+    saving (e.g. "screentime_cj Budget Enforcement").
   domain: automation
   source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
   input:
-    automation_name:
-      name: Automation Name
-      description: >-
-        Meant to name the created automation, but in testing HA ignored it
-        and every instance still got the generic blueprint name. Rename
-        each automation yourself after creating it (e.g. "Kid Mac Budget
-        Enforcement — aaron").
-      default: "Kid Mac Budget Enforcement"
-      selector:
-        text: {}
-    minutes_sensor:
-      name: Minutes Sensor
-      description: >-
-        The kid's "<child> Mac Minutes" sensor. Search the kid's name in
-        the picker; don't guess the entity_id, HA builds it from the device
-        name too (e.g. sensor.screentime_cj_mac_screentime_cj_mac_minutes).
+    total_minutes_sensor:
+      name: Total Minutes Today
+      description: The kid's "Total Minutes Today" sensor (on the kid's own device, not a Mac's).
       selector:
         entity:
           domain: sensor
     daily_budget_entity:
-      name: Daily Budget Number
-      description: >-
-        The kid's "<child> Mac Daily Budget (min)" number entity, from the
-        same Mac device as the minutes sensor.
+      name: Daily Budget
+      description: The kid's "Daily Budget" number.
+      selector:
+        entity:
+          domain: number
+    bonus_minutes_entity:
+      name: Bonus Minutes
+      description: The kid's "Bonus Minutes" number.
+      selector:
+        entity:
+          domain: number
+    max_bonus_entity:
+      name: Max Bonus Minutes
+      description: The kid's "Max Bonus Minutes" number (caps how much bonus counts).
       selector:
         entity:
           domain: number
     parent_override_switch:
-      name: Parent Override Switch
+      name: Parent Override
       description: >-
-        The kid's "<child> Mac Parent Override" switch — while on, this
-        automation does nothing, letting a parent hold `allowed` at
-        whatever they've manually set regardless of minutes/budget.
+        The kid's "Parent Override" switch. While on, this automation leaves
+        `allowed` alone so a parent can hold it wherever they set it.
       selector:
         entity:
           domain: switch
     allowed_topic:
       name: Allowed MQTT Topic
       description: >-
-        The MQTT topic to publish the allowed state to, matching that kid's
-        topic_prefix in config.json plus "/allowed" (e.g.
-        screen/screentime_cj/allowed when child_name is screentime_cj).
+        The kid's topic_prefix plus "/allowed", e.g.
+        screen/screentime_cj/allowed. The installer's setup checklist lists
+        the exact value for each kid.
       selector:
         text: {}
 
-alias: !input automation_name
+variables:
+  minutes_e: !input total_minutes_sensor
+  budget_e: !input daily_budget_entity
+  bonus_e: !input bonus_minutes_entity
+  max_bonus_e: !input max_bonus_entity
 
 trigger:
   - platform: state
-    entity_id: !input minutes_sensor
+    entity_id: !input total_minutes_sensor
   - platform: state
     entity_id: !input daily_budget_entity
+  - platform: state
+    entity_id: !input bonus_minutes_entity
+  - platform: state
+    entity_id: !input max_bonus_entity
+  - platform: state
+    entity_id: !input parent_override_switch
 
 condition:
   - condition: not
@@ -86,13 +82,22 @@ condition:
       - condition: state
         entity_id: !input parent_override_switch
         state: "on"
+  # Without a real budget the math below would treat it as 0 and block the
+  # kid immediately — do nothing until a parent has set one.
+  - condition: template
+    value_template: "{{ states(budget_e) | is_number }}"
 
 action:
   - choose:
+      # Same effective-budget formula the Macs use for their voice
+      # announcements: base + min(bonus, max bonus). >= so reaching the
+      # budget exactly blocks. Max bonus defaults to 60 like the daemon.
       - conditions:
-          - condition: numeric_state
-            entity_id: !input minutes_sensor
-            above: !input daily_budget_entity
+          - condition: template
+            value_template: >-
+              {{ states(minutes_e) | float(0) >=
+                 states(budget_e) | float(0)
+                 + [states(bonus_e) | float(0), states(max_bonus_e) | float(60)] | min }}
         sequence:
           - service: mqtt.publish
             data:
@@ -100,16 +105,13 @@ action:
               qos: 1
               retain: true
               payload: "0"
-      - conditions:
-          - condition: numeric_state
-            entity_id: !input minutes_sensor
-            below: !input daily_budget_entity
-        sequence:
-          - service: mqtt.publish
-            data:
-              topic: !input allowed_topic
-              qos: 1
-              retain: true
-              payload: "1"
+    default:
+      - service: mqtt.publish
+        data:
+          topic: !input allowed_topic
+          qos: 1
+          retain: true
+          payload: "1"
 
 mode: single
+max_exceeded: silent

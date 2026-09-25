@@ -269,6 +269,10 @@ class UsageState:
     def minutes_today(self) -> int:
         return int(self._data.get("seconds_today", 0.0) // 60)
 
+    @property
+    def date(self) -> str:
+        return str(self._data.get("date"))
+
     def ensure_today(self) -> None:
         """Call every poll tick, for every kid (not just whoever's
         active) — matches the original's ensure_today, needed so a kid
@@ -482,6 +486,32 @@ def minutes_topic(topic_prefix: str, device_id: str) -> str:
     return f"{topic_prefix}/mac/{device_id}/minutes_today"
 
 
+# minutes_today payload is JSON {"minutes": N, "date": "YYYY-MM-DD"}, not a
+# bare number: other Macs add it into the kid's combined total, and the date
+# lets them skip a value left over from yesterday by a Mac that was asleep
+# or off at midnight. The HA sensor reads it via value_template.
+def _minutes_payload(minutes: int, date: str) -> str:
+    return json.dumps({"minutes": minutes, "date": date})
+
+
+def _parse_minutes_payload(raw: bytes) -> tuple[Optional[int], Optional[str]]:
+    text = raw.decode("utf-8", errors="ignore").strip()
+    if not text:
+        return None, None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None, None
+    if isinstance(data, dict):
+        try:
+            return int(data.get("minutes", 0)), str(data.get("date") or "") or None
+        except (TypeError, ValueError):
+            return None, None
+    if isinstance(data, (int, float)):
+        return int(data), None  # bare number from an older daemon: date unknown
+    return None, None
+
+
 def active_topic(topic_prefix: str, device_id: str) -> str:
     return f"{topic_prefix}/mac/{device_id}/active"
 
@@ -497,12 +527,16 @@ def allow_topic(topic_prefix: str) -> str:
     return f"{topic_prefix}/allowed"
 
 
-def daily_budget_topic(child: str, device_id: str) -> str:
-    """Matches screentime_enforcer.py's budget_state_topic exactly:
-    homeassistant/{child}_{device_id}_mac/daily_budget/state — this is the
-    HA-managed `number` entity's own state/command topic (same topic for
-    both), not something under our screen/... namespace."""
-    return f"homeassistant/{child}_{device_id}_mac/daily_budget/state"
+# Per-KID, not per-Mac: every Mac managing a kid uses these same topics, so
+# a kid has one Daily Budget / Bonus / Max Bonus / Parent Override across the
+# whole household instead of one per Mac. The HA-managed number/switch
+# entity's own state+command topic (same topic for both).
+def shared_base_id(child: str) -> str:
+    return f"{child}_shared"
+
+
+def daily_budget_topic(child: str) -> str:
+    return f"homeassistant/{shared_base_id(child)}/daily_budget/state"
 
 
 # New — bonus time, not in screentime_enforcer.py at all. Two entities,
@@ -514,12 +548,12 @@ def daily_budget_topic(child: str, device_id: str) -> str:
 # (min(bonus, max_bonus)) rather than trusting the raw bonus value
 # directly, so typing more bonus than the cap allows doesn't actually
 # grant more than the parent's own standing limit.
-def bonus_minutes_topic(child: str, device_id: str) -> str:
-    return f"homeassistant/{child}_{device_id}_mac/bonus_minutes/state"
+def bonus_minutes_topic(child: str) -> str:
+    return f"homeassistant/{shared_base_id(child)}/bonus_minutes/state"
 
 
-def max_bonus_minutes_topic(child: str, device_id: str) -> str:
-    return f"homeassistant/{child}_{device_id}_mac/max_bonus_minutes/state"
+def max_bonus_minutes_topic(child: str) -> str:
+    return f"homeassistant/{shared_base_id(child)}/max_bonus_minutes/state"
 
 
 DEFAULT_MAX_BONUS_MINUTES = 60.0  # used only if the parent hasn't set one yet
@@ -811,19 +845,27 @@ def session_state_topic(topic_prefix: str, device_id: str) -> str:
     return f"{topic_prefix}/mac/{device_id}/session_state"
 
 
-# Matches screentime_enforcer.py's override_state_topic exactly (same
-# f"homeassistant/{base_id}/override/state" shape as daily_budget/
-# bonus_minutes/max_bonus_minutes above) — this daemon never reads it
-# back (parent_override is checked in the HA automation blueprint, not
-# here, same as the original agent), it only needs to publish discovery
-# so the entity exists at all. Without this, a from-scratch install (no
-# history of the old agent ever having published it) has no Parent
-# Override switch for the blueprint to point at.
-def override_state_topic(child: str, device_id: str) -> str:
-    return f"homeassistant/{child}_{device_id}_mac/override/state"
+# Per-kid like daily_budget above. This daemon never reads it back (parent
+# override is checked in the HA budget blueprint, not here); it only
+# publishes discovery so the switch exists.
+def override_state_topic(child: str) -> str:
+    return f"homeassistant/{shared_base_id(child)}/override/state"
 
 
-ROOT_DAEMON_VERSION = "0.1.0-skeleton"
+# The kid's minutes today summed across every Mac, computed by each Mac from
+# its siblings' retained minutes_today (see minutes_wildcard_topic) and
+# published per kid, so HA gets the combined total with no helpers.
+def total_minutes_topic(topic_prefix: str) -> str:
+    return f"{topic_prefix}/total_minutes_today"
+
+
+# Subscribing here makes the broker deliver every Mac's retained
+# minutes_today for this kid — that's how a Mac learns its siblings exist.
+def minutes_wildcard_topic(topic_prefix: str) -> str:
+    return f"{topic_prefix}/mac/+/minutes_today"
+
+
+ROOT_DAEMON_VERSION = "0.2.0"
 
 
 def _discovery_device(
@@ -861,6 +903,192 @@ def _discovery_device(
     }
 
 
+def _shared_discovery_device(child: str) -> dict:
+    """The per-KID device holding everything that's one-per-kid across the
+    household (allowed, budget, bonus, max bonus, parent override, total
+    minutes). Every Mac managing this kid publishes it identically, so HA
+    shows exactly one — no Mac is "in charge" of it.
+
+    Entity names under it are short ("Daily Budget"): HA prefixes the device
+    name itself (confirmed on real hardware — friendly_name came out as
+    "<device name> <entity name>"), giving "<child> Daily Budget" and a
+    predictable entity_id like number.<child>_daily_budget.
+    """
+    return {
+        "identifiers": [shared_base_id(child)],
+        "name": child,
+        "manufacturer": "Screen Time Agent",
+        "model": "Kid (all Macs)",
+        "sw_version": ROOT_DAEMON_VERSION,
+    }
+
+
+# Per-Mac discovery config topics published by versions before the per-kid
+# shared entities. Cleared (empty retained payload = delete in HA) on every
+# connect so upgrading removes the old entities instead of leaving duplicates
+# behind for the user to delete by hand. Harmless no-op once they're gone.
+_LEGACY_DISCOVERY = [
+    ("sensor", "session_state"),
+    ("switch", "allowed"),
+    ("number", "daily_budget_minutes"),
+    ("number", "bonus_minutes"),
+    ("number", "max_bonus_minutes"),
+    ("binary_sensor", "online"),
+    ("sensor", "minutes"),
+    ("binary_sensor", "active"),
+    ("switch", "parent_override"),
+]
+
+
+def _publish_discovery(
+    client: mqtt.Client, mqtt_config: DaemonMqttConfig, child: str, prefix: str
+) -> None:
+    """Publishes every HA entity for one kid, retained. Re-publishing on
+    every connect is idempotent.
+
+    Two groups:
+    - per Mac (only this Mac knows it): minutes, active, online, session
+      state — under this Mac's device for the kid;
+    - per kid (one across all Macs): allowed, daily budget, bonus, max
+      bonus, parent override, total minutes — under the kid's shared device.
+      Every Mac managing the kid publishes these byte-identically, so HA ends
+      up with exactly one of each.
+
+    Entity names are short; HA prefixes the device name, so entity_ids come
+    out as e.g. number.<child>_daily_budget and
+    sensor.<child>_mac_<device>_minutes.
+    """
+    device_id = mqtt_config.device_id
+    old_base = f"{child}_{device_id}_mac"
+    for domain, suffix in _LEGACY_DISCOVERY:
+        client.publish(
+            f"homeassistant/{domain}/{old_base}_{suffix}/config",
+            payload="",
+            retain=True,
+            qos=1,
+        )
+
+    mac_device = _discovery_device(child, device_id, mqtt_config.device_friendly_name)
+    mac_base = f"{child}_{device_id}"
+    shared_device = _shared_discovery_device(child)
+    sb = shared_base_id(child)
+    availability = {
+        "availability_topic": availability_topic(prefix, device_id),
+        "payload_available": "online",
+        "payload_not_available": "offline",
+    }
+    minutes_number = {
+        "min": 0,
+        "step": 5,
+        "mode": "box",
+        "retain": True,
+        "unit_of_measurement": "min",
+    }
+    entities = [
+        # --- per Mac ---
+        ("sensor", f"{mac_base}_minutes", {
+            "name": "Minutes",
+            "state_topic": minutes_topic(prefix, device_id),
+            "value_template": "{{ value_json.minutes }}",
+            "device_class": "duration",
+            "state_class": "total_increasing",
+            "unit_of_measurement": "min",
+            "icon": "mdi:timer-outline",
+            "device": mac_device,
+        }),
+        ("binary_sensor", f"{mac_base}_active", {
+            "name": "Active",
+            "state_topic": active_topic(prefix, device_id),
+            "payload_on": "1",
+            "payload_off": "0",
+            "device_class": "running",
+            "icon": "mdi:laptop",
+            "device": mac_device,
+            **availability,
+        }),
+        ("binary_sensor", f"{mac_base}_online", {
+            "name": "Online",
+            "state_topic": availability_topic(prefix, device_id),
+            "payload_on": "online",
+            "payload_off": "offline",
+            "device_class": "connectivity",
+            "icon": "mdi:lan-connect",
+            "device": mac_device,
+        }),
+        ("sensor", f"{mac_base}_session_state", {
+            "name": "Session State",
+            "state_topic": session_state_topic(prefix, device_id),
+            "icon": "mdi:account-clock",
+            "device": mac_device,
+        }),
+        # --- per kid, shared by every Mac ---
+        ("switch", f"{sb}_allowed", {
+            "name": "Allowed",
+            "state_topic": allow_topic(prefix),
+            "command_topic": allow_topic(prefix),
+            "payload_on": "1",
+            "payload_off": "0",
+            "retain": True,
+            "icon": "mdi:shield-check",
+            "device": shared_device,
+        }),
+        ("number", f"{sb}_daily_budget", {
+            "name": "Daily Budget",
+            "state_topic": daily_budget_topic(child),
+            "command_topic": daily_budget_topic(child),
+            "max": 600,
+            **minutes_number,
+            "icon": "mdi:timer-sand",
+            "device": shared_device,
+        }),
+        ("number", f"{sb}_bonus_minutes", {
+            "name": "Bonus Minutes",
+            "state_topic": bonus_minutes_topic(child),
+            "command_topic": bonus_minutes_topic(child),
+            "max": 240,
+            **minutes_number,
+            "icon": "mdi:timer-plus",
+            "device": shared_device,
+        }),
+        ("number", f"{sb}_max_bonus_minutes", {
+            "name": "Max Bonus Minutes",
+            "state_topic": max_bonus_minutes_topic(child),
+            "command_topic": max_bonus_minutes_topic(child),
+            "max": 240,
+            **minutes_number,
+            "icon": "mdi:timer-lock",
+            "device": shared_device,
+        }),
+        ("switch", f"{sb}_parent_override", {
+            "name": "Parent Override",
+            "state_topic": override_state_topic(child),
+            "command_topic": override_state_topic(child),
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "retain": True,
+            "icon": "mdi:shield-star",
+            "device": shared_device,
+        }),
+        ("sensor", f"{sb}_total_minutes_today", {
+            "name": "Total Minutes Today",
+            "state_topic": total_minutes_topic(prefix),
+            "device_class": "duration",
+            "state_class": "total_increasing",
+            "unit_of_measurement": "min",
+            "icon": "mdi:timer-sand-complete",
+            "device": shared_device,
+        }),
+    ]
+    for domain, unique_id, payload in entities:
+        payload["unique_id"] = unique_id
+        client.publish(
+            f"homeassistant/{domain}/{unique_id}/config",
+            json.dumps(payload),
+            retain=True,
+            qos=1,
+        )
+
+
 def build_mqtt_client(
     mqtt_config: DaemonMqttConfig,
     registry: ManagedUserRegistry,
@@ -868,14 +1096,15 @@ def build_mqtt_client(
     budget_state: dict,
     bonus_state: dict,
     max_bonus_state: dict,
+    sibling_minutes: dict,
 ) -> mqtt.Client:
     """
     ONE client for the whole machine (requirement #4), not one per kid —
     the actual architectural point of this rewrite. client_id is keyed by
     device only.
 
-    allowed_state/budget_state/bonus_state/max_bonus_state are plain
-    dicts the caller owns — this function's on_message callback writes
+    allowed_state/budget_state/bonus_state/max_bonus_state/sibling_minutes
+    (child -> {device_id -> (minutes, date)}) are plain dicts the caller owns — this function's on_message callback writes
     into them (from paho's background thread, via loop_start()) and
     main()'s poll loop reads from them (main thread). No lock around
     that: matches the original
@@ -914,267 +1143,20 @@ def build_mqtt_client(
             prefix = registry.topic_prefix_for(child)
             if not prefix:
                 continue
-            # Retained topic — subscribing delivers the current value
-            # immediately via on_message below, same as the original
-            # agent's own _on_connect subscribe.
+            # Retained topics — subscribing delivers the current values
+            # immediately via on_message below.
             client.subscribe(allow_topic(prefix))
-            client.subscribe(daily_budget_topic(child, mqtt_config.device_id))
-            client.subscribe(bonus_minutes_topic(child, mqtt_config.device_id))
-            client.subscribe(max_bonus_minutes_topic(child, mqtt_config.device_id))
+            client.subscribe(daily_budget_topic(child))
+            client.subscribe(bonus_minutes_topic(child))
+            client.subscribe(max_bonus_minutes_topic(child))
+            client.subscribe(minutes_wildcard_topic(prefix))
             client.publish(
                 availability_topic(prefix, mqtt_config.device_id),
                 payload="online",
                 retain=True,
                 qos=1,
             )
-            # session_state discovery — new sensor, not part of the
-            # original agent's scheme (see session_state_topic above for
-            # why). Re-publishing discovery on every connect is cheap and
-            # idempotent (retained, same payload), so no "already
-            # published" guard needed like the original agent's
-            # _discovery_published flag.
-            base_id = f"{child}_{mqtt_config.device_id}_mac"
-            discovery_topic = f"homeassistant/sensor/{base_id}_session_state/config"
-            discovery_payload = {
-                "name": f"{child} Mac Session State",
-                "unique_id": f"{base_id}_session_state",
-                "state_topic": session_state_topic(prefix, mqtt_config.device_id),
-                "icon": "mdi:account-clock",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                discovery_topic, json.dumps(discovery_payload), retain=True, qos=1
-            )
-
-            # Fix for the existing "allowed" switch's discovery config:
-            # screentime_enforcer.py's original definition never sets
-            # "retain": true, so HA's MQTT switch integration doesn't
-            # retain the command it publishes when a PARENT manually
-            # toggles it in the UI (confirmed on the real broker:
-            # screen/cj/allowed's retained value was stale "1" even with
-            # the switch showing off in HA, because the manual toggle was
-            # never retained). Republishing the SAME unique_id/topics
-            # here, with retain added, updates HA's existing entity in
-            # place — no duplicate entity, no change from HA's side.
-            # Existing stale retained values aren't fixed retroactively by
-            # this alone; toggling the switch once after this deploys
-            # will correctly retain going forward.
-            allowed_discovery_topic = f"homeassistant/switch/{base_id}_allowed/config"
-            allowed_discovery_payload = {
-                "name": f"{child} Mac Allowed",
-                "unique_id": f"{base_id}_allowed",
-                "state_topic": allow_topic(prefix),
-                "command_topic": allow_topic(prefix),
-                "payload_on": "1",
-                "payload_off": "0",
-                "retain": True,
-                "icon": "mdi:shield-check",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                allowed_discovery_topic,
-                json.dumps(allowed_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            # Same retain fix, same reasoning, for the daily_budget number
-            # entity — confirmed on the real broker this topic currently
-            # has NO retained value at all for cj, consistent with the
-            # same missing "retain": true gap in the original's discovery
-            # config.
-            budget_topic = daily_budget_topic(child, mqtt_config.device_id)
-            budget_discovery_topic = f"homeassistant/number/{base_id}_daily_budget_minutes/config"
-            budget_discovery_payload = {
-                "name": f"{child} Mac Daily Budget (min)",
-                "unique_id": f"{base_id}_daily_budget_minutes",
-                "state_topic": budget_topic,
-                "command_topic": budget_topic,
-                "min": 0,
-                "max": 240,
-                "step": 5,
-                "mode": "box",
-                "retain": True,
-                "unit_of_measurement": "min",
-                "icon": "mdi:timer-sand",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                budget_discovery_topic,
-                json.dumps(budget_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            # Bonus time — see bonus_minutes_topic's comment above for the
-            # bonus/max_bonus split. Two new number entities, same
-            # discovery pattern (retain: true from the start, no
-            # after-the-fact fix needed this time).
-            bonus_topic = bonus_minutes_topic(child, mqtt_config.device_id)
-            bonus_discovery_topic = f"homeassistant/number/{base_id}_bonus_minutes/config"
-            bonus_discovery_payload = {
-                "name": f"{child} Mac Bonus Minutes",
-                "unique_id": f"{base_id}_bonus_minutes",
-                "state_topic": bonus_topic,
-                "command_topic": bonus_topic,
-                "min": 0,
-                "max": 240,
-                "step": 5,
-                "mode": "box",
-                "retain": True,
-                "unit_of_measurement": "min",
-                "icon": "mdi:timer-plus",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                bonus_discovery_topic,
-                json.dumps(bonus_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            max_bonus_topic = max_bonus_minutes_topic(child, mqtt_config.device_id)
-            max_bonus_discovery_topic = (
-                f"homeassistant/number/{base_id}_max_bonus_minutes/config"
-            )
-            max_bonus_discovery_payload = {
-                "name": f"{child} Mac Max Bonus Minutes",
-                "unique_id": f"{base_id}_max_bonus_minutes",
-                "state_topic": max_bonus_topic,
-                "command_topic": max_bonus_topic,
-                "min": 0,
-                "max": 240,
-                "step": 5,
-                "mode": "box",
-                "retain": True,
-                "unit_of_measurement": "min",
-                "icon": "mdi:timer-lock",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                max_bonus_discovery_topic,
-                json.dumps(max_bonus_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            # The four entities below match screentime_enforcer.py's own
-            # discovery exactly (same names/unique_ids/topics) — on a
-            # MACHINE THAT MIGRATED from the old agent, these already
-            # exist from its own past discovery publishes, so this daemon
-            # never needed to re-publish them itself. That assumption
-            # breaks completely on a from-scratch install with no such
-            # history (confirmed on real hardware: a fresh install showed
-            # only the 5 entities above — no minutes, no active, no
-            # parent_override at all, since nothing had ever published
-            # discovery for them under this device_id). Publishing them
-            # here too makes the root daemon fully self-sufficient
-            # without requiring the old agent to have ever run first.
-            online_discovery_topic = f"homeassistant/binary_sensor/{base_id}_online/config"
-            online_discovery_payload = {
-                "name": f"{child} Mac Agent Online",
-                "unique_id": f"{base_id}_online",
-                "state_topic": availability_topic(prefix, mqtt_config.device_id),
-                "payload_on": "online",
-                "payload_off": "offline",
-                "device_class": "connectivity",
-                "icon": "mdi:lan-connect",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                online_discovery_topic,
-                json.dumps(online_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            minutes_discovery_topic = f"homeassistant/sensor/{base_id}_minutes/config"
-            minutes_discovery_payload = {
-                "name": f"{child} Mac Minutes",
-                "unique_id": f"{base_id}_minutes",
-                "state_topic": minutes_topic(prefix, mqtt_config.device_id),
-                "device_class": "duration",
-                "state_class": "total_increasing",
-                "unit_of_measurement": "min",
-                "icon": "mdi:timer-outline",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                minutes_discovery_topic,
-                json.dumps(minutes_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            active_discovery_topic = f"homeassistant/binary_sensor/{base_id}_active/config"
-            active_discovery_payload = {
-                "name": f"{child} Mac Active",
-                "unique_id": f"{base_id}_active",
-                "state_topic": active_topic(prefix, mqtt_config.device_id),
-                "payload_on": "1",
-                "payload_off": "0",
-                "device_class": "running",
-                "icon": "mdi:laptop",
-                "availability_topic": availability_topic(prefix, mqtt_config.device_id),
-                "payload_available": "online",
-                "payload_not_available": "offline",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                active_discovery_topic,
-                json.dumps(active_discovery_payload),
-                retain=True,
-                qos=1,
-            )
-
-            # No initial-value publish here, unlike the original agent's
-            # one-time "OFF" default: that only ran once per process
-            # lifetime (guarded by _discovery_published), but this whole
-            # block runs on EVERY connect/reconnect with no such guard —
-            # publishing a default here unconditionally would reset a
-            # parent's real override choice back to OFF on every
-            # reconnect (a network blip, not just a restart). Leaving it
-            # unset is safe: HA shows it as unknown until first toggled,
-            # and the blueprint's `state: "on"` check is false either way.
-            override_discovery_topic = f"homeassistant/switch/{base_id}_parent_override/config"
-            override_discovery_payload = {
-                "name": f"{child} Mac Parent Override",
-                "unique_id": f"{base_id}_parent_override",
-                "state_topic": override_state_topic(child, mqtt_config.device_id),
-                "command_topic": override_state_topic(child, mqtt_config.device_id),
-                "payload_on": "ON",
-                "payload_off": "OFF",
-                # Same fix as allowed/daily_budget: without this, HA doesn't
-                # retain a parent's toggle, so after an HA/broker restart the
-                # switch reads unknown/off and enforcement silently resumes.
-                "retain": True,
-                "icon": "mdi:shield-star",
-                "device": _discovery_device(
-                    child, mqtt_config.device_id, mqtt_config.device_friendly_name
-                ),
-            }
-            client.publish(
-                override_discovery_topic,
-                json.dumps(override_discovery_payload),
-                retain=True,
-                qos=1,
-            )
+            _publish_discovery(client, mqtt_config, child, prefix)
 
     def on_disconnect(client, userdata, disconnect_flags, reason_code, properties=None):
         rc = int(getattr(reason_code, "value", reason_code))
@@ -1192,23 +1174,51 @@ def build_mqtt_client(
     # topic -> (child, the dict to write into, a label for logging).
     numeric_topic_handlers: dict = {}
     for child in registry.all_children():
-        numeric_topic_handlers[daily_budget_topic(child, mqtt_config.device_id)] = (
+        numeric_topic_handlers[daily_budget_topic(child)] = (
             child,
             budget_state,
             "Budget",
         )
-        numeric_topic_handlers[bonus_minutes_topic(child, mqtt_config.device_id)] = (
+        numeric_topic_handlers[bonus_minutes_topic(child)] = (
             child,
             bonus_state,
             "Bonus",
         )
-        numeric_topic_handlers[max_bonus_minutes_topic(child, mqtt_config.device_id)] = (
+        numeric_topic_handlers[max_bonus_minutes_topic(child)] = (
             child,
             max_bonus_state,
             "Max bonus",
         )
 
+    # prefix -> child, for recognising other Macs' minutes arriving via the
+    # minutes_wildcard_topic subscription.
+    prefix_to_child = {
+        prefix: child
+        for child in registry.all_children()
+        for prefix in [registry.topic_prefix_for(child)]
+        if prefix
+    }
+
+    def handle_sibling_minutes(topic: str, raw: bytes) -> None:
+        # <prefix>/mac/<device_id>/minutes_today — the prefix itself may
+        # contain slashes, so split on the "/mac/" marker, not on "/".
+        suffix = "/minutes_today"
+        if not topic.endswith(suffix) or "/mac/" not in topic:
+            return
+        prefix, _, rest = topic.rpartition("/mac/")
+        device = rest[: -len(suffix)]
+        child = prefix_to_child.get(prefix)
+        if child is None or not device or "/" in device:
+            return
+        minutes, date = _parse_minutes_payload(raw)
+        if minutes is None:
+            return
+        sibling_minutes.setdefault(child, {})[device] = (minutes, date)
+
     def on_message(client, userdata, message):
+        if message.topic.endswith("/minutes_today"):
+            handle_sibling_minutes(message.topic, message.payload or b"")
+            return
         if message.topic in numeric_topic_handlers:
             child, target, label = numeric_topic_handlers[message.topic]
             payload = (message.payload or b"").decode("utf-8", errors="ignore")
@@ -1273,6 +1283,9 @@ def main() -> None:
     bonus_state: dict = {}  # child -> float minutes, raw (uncapped) bonus granted today
     max_bonus_state: dict = {}  # child -> float minutes, standing cap on bonus (not reset nightly)
     grace_started_at: dict = {}  # per-kid, only used when fail_mode="grace"
+    # child -> {device_id -> (minutes, date)}: every Mac's reported minutes
+    # for the kid (including this one's own echo), via the wildcard subscribe.
+    sibling_minutes: dict = {}
 
     # Budget/bonus voice warnings — new, not in screentime_enforcer.py
     # (which only covers 5/1 minutes remaining and never announces a
@@ -1301,7 +1314,13 @@ def main() -> None:
     blocked_unlock_counted: dict = {}  # child -> bool, matches original's per-instance flag
 
     mqtt_client = build_mqtt_client(
-        mqtt_config, registry, allowed_state, budget_state, bonus_state, max_bonus_state
+        mqtt_config,
+        registry,
+        allowed_state,
+        budget_state,
+        bonus_state,
+        max_bonus_state,
+        sibling_minutes,
     )
     logger.info(
         "Connecting to MQTT %s:%s as device '%s'.",
@@ -1317,7 +1336,25 @@ def main() -> None:
     last_seen_locked: Optional[bool] = None  # sentinel, always logs the first reading
     active_child: Optional[str] = None  # the kid currently accruing time, if any
 
-    last_published_minutes: dict[str, int] = {}
+    last_published_minutes: dict[str, tuple[int, str]] = {}
+    last_published_total: dict[str, int] = {}
+    was_connected = False
+
+    def combined_minutes(child: str) -> int:
+        """This Mac's own minutes (from UsageState, always current) plus
+        every OTHER Mac's latest report for today. Skips this Mac's own echo
+        from the wildcard, and any sibling value dated a different day (a
+        Mac asleep or off at midnight). A bare-number value from an older
+        daemon has no date and is counted as-is."""
+        today = usage_states[child].date
+        total = usage_states[child].minutes_today()
+        for device, (minutes, date) in sibling_minutes.get(child, {}).items():
+            if device == mqtt_config.device_id:
+                continue
+            if date is not None and date != today:
+                continue
+            total += minutes
+        return total
     last_published_state: dict[str, str] = {}
 
     logger.info("Starting console-user + lock-state detection loop (Ctrl+C to stop).")
@@ -1606,23 +1643,45 @@ def main() -> None:
                             )
                             lock_session(uid, expected_mac_user=current_user)
 
-            # Minute accumulation + publish — persisted per kid (see
-            # UsageState), resets at local midnight. Publishes only when
-            # the whole minutes value actually changes, not every tick.
+            # Minute accumulation — persisted per kid (see UsageState), resets
+            # at local midnight.
             if active_child is not None:
                 usage_states[active_child].add_seconds(POLL_INTERVAL_SECONDS)
-                minutes = usage_states[active_child].minutes_today()
-                if minutes != last_published_minutes.get(active_child):
-                    prefix = registry.topic_prefix_for(active_child)
-                    if prefix:
-                        mqtt_client.publish(
-                            minutes_topic(prefix, mqtt_config.device_id),
-                            payload=str(minutes),
-                            retain=True,
-                            qos=1,
-                        )
-                    last_published_minutes[active_child] = minutes
 
+            # Publish EVERY kid's minutes and combined total, on change only.
+            # Every kid, not just the active one, so a midnight reset reaches
+            # HA (and the other Macs' totals) even for a kid who never touches
+            # this Mac that day. After a reconnect everything is republished
+            # once, so values missed while disconnected are refreshed.
+            connected = mqtt_client.is_connected()
+            if connected and not was_connected:
+                last_published_minutes.clear()
+                last_published_total.clear()
+            was_connected = connected
+            for child in registry.all_children():
+                prefix = registry.topic_prefix_for(child)
+                if not prefix:
+                    continue
+                own = (usage_states[child].minutes_today(), usage_states[child].date)
+                if own != last_published_minutes.get(child):
+                    mqtt_client.publish(
+                        minutes_topic(prefix, mqtt_config.device_id),
+                        payload=_minutes_payload(*own),
+                        retain=True,
+                        qos=1,
+                    )
+                    last_published_minutes[child] = own
+                total = combined_minutes(child)
+                if total != last_published_total.get(child):
+                    mqtt_client.publish(
+                        total_minutes_topic(prefix),
+                        payload=str(total),
+                        retain=True,
+                        qos=1,
+                    )
+                    last_published_total[child] = total
+
+            if active_child is not None:
                 # Budget/bonus voice warnings — the FIRST value ever seen
                 # for a kid (this daemon run — last_announced_base/
                 # last_announced_bonus_applied aren't persisted) gets the
@@ -1705,7 +1764,7 @@ def main() -> None:
                         last_announced_bonus_applied[active_child] = current_bonus_applied
                         budget_warned_thresholds[active_child] = set()
 
-                    remaining = current_effective - usage_states[active_child].minutes_today()
+                    remaining = current_effective - combined_minutes(active_child)
                     warned = budget_warned_thresholds.setdefault(active_child, set())
                     if remaining > max(BUDGET_WARNING_THRESHOLDS):
                         warned.clear()

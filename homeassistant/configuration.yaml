@@ -1,106 +1,45 @@
 # Home Assistant notes for this project.
 #
-# There is deliberately no mqtt:/input_number:/input_boolean: YAML below
-# (an earlier version of this file had one). As of MQTT discovery being
-# wired in, both screentime_enforcer.py and root-daemon/root_daemon_skeleton.py
-# publish their own discovery configs for every entity a managed kid
-# needs, the moment they connect:
+# There is deliberately no mqtt:/input_number:/input_boolean:/template:
+# YAML below. The root daemon (root-daemon/root_daemon_skeleton.py)
+# publishes MQTT discovery for every entity it needs the moment it
+# connects, so nothing has to be defined by hand. Two kinds of device
+# appear under Settings -> Devices & Services -> MQTT:
 #
-#   <child> Mac Minutes              sensor
-#   <child> Mac Active               binary_sensor
-#   <child> Mac Agent Online         binary_sensor
-#   <child> Mac Allowed              switch (parent-settable)
-#   <child> Mac Daily Budget (min)   number (parent-settable)
-#   <child> Mac Parent Override      switch (parent-settable)
-#   <child> Mac Session State        sensor — root daemon only (active/locked/backgrounded/offline)
-#   <child> Mac Bonus Minutes        number (parent-settable) — root daemon only
-#   <child> Mac Max Bonus Minutes    number (parent-settable) — root daemon only
+# One device PER KID, named after the kid (e.g. "screentime_cj"). Every Mac
+# managing that kid publishes it identically, so HA shows exactly one:
+#   <child> Allowed               switch (parent-settable; drives lock/unlock)
+#   <child> Daily Budget          number (parent-settable, minutes)
+#   <child> Bonus Minutes         number (parent-settable, minutes)
+#   <child> Max Bonus Minutes     number (parent-settable; caps counted bonus)
+#   <child> Parent Override       switch (parent-settable)
+#   <child> Total Minutes Today   sensor (summed across every Mac, by the Macs)
+# Entity ids are predictable: number.<child>_daily_budget,
+# sensor.<child>_total_minutes_today, switch.<child>_allowed, ...
 #
-# All of them are per kid PER MAC, grouped under one HA device named
-# "<child> mac (<friendly name or device_id>)". They appear automatically
-# under Settings -> Devices & Services -> MQTT once the agent/daemon is
-# running and connected. Defining your own versions of them here
-# (input_number, input_boolean, or a manual mqtt: sensor:/binary_sensor:
-# block) creates a SEPARATE set of entities the agent/daemon never reads
-# from or writes to — editing them does nothing.
+# One device PER KID PER MAC, named "<child> mac (<friendly name or
+# device_id>)", for things that really are per machine:
+#   Minutes         sensor (this Mac only)
+#   Active          binary_sensor
+#   Online          binary_sensor
+#   Session State   sensor (active/locked/backgrounded/offline)
 #
-# Don't guess entity_ids from these names. HA builds them from the device
-# name AND the entity name, and on real installs they came out like
-# sensor.screentime_cj_mac_screentime_cj_mac_minutes. Look them up under
-# Developer Tools -> States (search the kid's name), or just use the
-# blueprints' entity pickers.
+# Defining your own versions of any of these here creates a SEPARATE set of
+# entities the daemon never reads from or writes to — editing them does
+# nothing.
 #
-# The only thing you actually add by hand is the automations that DRIVE
-# `allowed` from those entities. Don't hand-write these either — import
-# the blueprints from ../homeassistant/blueprints/ instead:
-#   - kid_mac_budget_enforcement.yaml — one automation PER managed kid,
-#     only if each kid uses ONE Mac (compares that Mac's minutes against
-#     its budget). Kids on several Macs: use the combined one below.
-#   - kid_mac_daily_reset.yaml — ONE automation total, covering every
-#     managed kid at once (just resets values, no per-kid logic needed).
+# What you DO add by hand is two automations, from the blueprints in
+# ./blueprints/ (import them, don't hand-write them):
+#   - kid_mac_budget_enforcement.yaml — ONE automation PER KID. Blocks the
+#     kid on every Mac once Total Minutes Today reaches Daily Budget +
+#     min(Bonus Minutes, Max Bonus Minutes); unblocks when back under.
+#   - kid_mac_daily_reset.yaml — ONE automation total, covering every kid.
 #
-# See the main README's "Home Assistant integration" section for the
-# full walkthrough, and config/CONFIG_REFERENCE.md for what every
-# config.json field on the Mac side actually does.
+# The installer prints the exact steps with your kids' names filled in and
+# saves them to /Library/Application Support/ha-screen-agent/ha_setup_checklist.txt.
+# See the main README's "Home Assistant integration" section for more, and
+# config/CONFIG_REFERENCE.md for every config.json field on the Mac side.
 #
-# ---------------------------------------------------------------------
-# Optional: ONE combined budget across multiple Macs, instead of a
-# separate budget per machine
-# ---------------------------------------------------------------------
-# A kid's minutes and daily_budget are tracked PER MAC (both topics
-# include device_id), but the `allowed` topic every Mac obeys is per KID.
-# So one kid_mac_budget_enforcement.yaml instance per Mac for the same kid
-# don't give separate per-Mac budgets — they fight over the shared topic:
-# going over budget on one Mac locks every Mac, and the next minute tick on
-# a Mac with budget left unlocks them all again.
-#
-# For a kid on several Macs, use kid_mac_budget_enforcement_combined.yaml
-# instead: one combined total against one shared budget. It needs two pieces of
-# actual hand-written YAML first, since a blueprint can only define
-# automations, not sensors or helpers:
-#
-# The installer prints an exact, filled-in version of everything below and
-# saves it to /Library/Application Support/ha-screen-agent/ha_setup_checklist.txt
-# — use that; this is just the explanation.
-#
-# 1. A template sensor per kid, summing their minutes-today sensor across
-#    every Mac they use. Matches on each sensor's full display name
-#    ("<device name> <child> Mac Minutes", confirmed on real hardware), so
-#    no entity_ids need looking up and a new Mac is picked up
-#    automatically. Easiest via Helpers -> Create Helper -> Template ->
-#    Template a sensor, pasting (for a kid named kiddo):
-#
-#      {{ states.sensor
-#         | selectattr('attributes.friendly_name', 'search', ' kiddo Mac Minutes$')
-#         | map(attribute='state') | map('int', 0) | sum }}
-#
-#    The leading space stops e.g. "xkiddo" from matching too. int(0) means
-#    a Mac reading "unknown" (asleep/offline) counts as 0 instead of
-#    breaking the whole sum.
-#
-# 2. An input_number helper per kid, standing in for the single shared
-#    daily budget (instead of each Mac's own per-device number entity).
-#    Either via YAML:
-#
-#    input_number:
-#      kiddo_daily_budget_min:
-#        name: "Kiddo Daily Budget (Combined)"
-#        min: 0
-#        max: 600
-#        step: 5
-#        unit_of_measurement: min
-#        icon: mdi:timer-sand
-#
-#    ...or simpler: Settings -> Devices & Services -> Helpers -> Create
-#    Helper -> Number, no YAML needed either way.
-#
-# With both of those in place, create ONE automation per kid (not per
-# kid-per-machine) from kid_mac_budget_enforcement_combined.yaml,
-# pointing it at the template sensor and input_number above instead of
-# any single Mac's own entities, and at every Mac's Parent Override switch
-# for that kid. The two blueprints aren't meant to be mixed for the same kid.
-#
-# Neither blueprint counts Bonus Minutes yet — they compare against the
-# base budget only, even though the root daemon announces base + bonus as
-# the kid's total. Until that's fixed, raise the budget instead of
-# granting bonus.
+# The old per-user agent (screentime_enforcer.py) still uses its original
+# per-Mac entities ("<child> Mac Minutes", "<child> Mac Daily Budget (min)",
+# ...); the blueprints above are for the root daemon only.

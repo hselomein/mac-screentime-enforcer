@@ -701,7 +701,6 @@ fi
 
 # --- Blueprint delivery ---------------------------------------------------
 BUDGET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
-COMBINED_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_budget_enforcement_combined.yaml"
 RESET_BLUEPRINT="$PROJECT_DIR/homeassistant/blueprints/kid_mac_daily_reset.yaml"
 
 # HA's Import Blueprint dialog only accepts a URL, not pasted YAML — so
@@ -723,45 +722,30 @@ case "$REMOTE_URL" in
         RAW_BASE="https://raw.githubusercontent.com/${REPO_PATH%.git}/${CURRENT_BRANCH}"
         ;;
 esac
-
-echo ""
-echo "Import blueprints in HA: Settings > Automations & Scenes >"
-echo "Blueprints > Import Blueprint. Pick ONE budget blueprint per kid:"
-echo "  - per-Mac budget: only if the kid uses a single Mac"
-echo "  - combined: kid uses several Macs (needs a template sensor and an"
-echo "    input_number helper first, see homeassistant/configuration.yaml)"
-echo "Either way, one budget automation per kid. Daily reset needs only ONE"
-echo "automation total, listing every kid's entities in its 3 inputs."
-echo ""
 if [[ -n "$RAW_BASE" ]]; then
-    echo "Paste these URLs into the Import Blueprint dialog (requires this"
-    echo "repo to be public on GitHub):"
-    echo "  Budget, per Mac:    ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement.yaml"
-    echo "  Budget, combined:   ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement_combined.yaml"
-    echo "  Daily reset:        ${RAW_BASE}/homeassistant/blueprints/kid_mac_daily_reset.yaml"
-    echo ""
-    echo "If this repo is private instead, skip the URL import and place the"
-    echo "files directly under <HA config>/blueprints/automation/ — see README."
+    BLUEPRINT_IMPORT_TEXT="Paste each URL into Import Blueprint:
+     ${RAW_BASE}/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
+     ${RAW_BASE}/homeassistant/blueprints/kid_mac_daily_reset.yaml
+   (Needs the repo public on GitHub. If it's private, copy the two files
+   from this checkout into <HA config>/blueprints/automation/ instead,
+   then reload automations.)"
 else
-    echo "Couldn't determine a GitHub URL for this checkout. Either push this"
-    echo "repo to a public GitHub repo and use Import Blueprint with its raw"
-    echo "URL, or place these files directly on the HA filesystem instead:"
-    echo "  $BUDGET_BLUEPRINT"
-    echo "  $COMBINED_BLUEPRINT"
-    echo "  $RESET_BLUEPRINT"
-    echo "under <HA config>/blueprints/automation/ — see README for details."
+    BLUEPRINT_IMPORT_TEXT="No GitHub URL found for this checkout, so copy these two files
+   into <HA config>/blueprints/automation/ and reload automations:
+     $BUDGET_BLUEPRINT
+     $RESET_BLUEPRINT"
 fi
 
 # --- Home Assistant setup checklist ----------------------------------------
-# Everything that has to be created BY HAND in HA, filled in with this
-# install's real kid names so nothing needs looking up. The template sensor
-# matches on each sensor's full friendly_name ("<device name> <child> Mac
-# Minutes"), confirmed on real hardware, so it sums the kid's minutes across
-# every Mac with no entity_ids to find — and picks up a new Mac by itself.
-# Depends only on kid names, not on this Mac, so every Mac prints the same
-# list: do it once per household, not once per Mac.
+# Everything that still has to be done BY HAND in HA, filled in with this
+# install's real kid names. The Macs create every entity themselves via MQTT
+# discovery — including one device per kid (named after the kid) holding
+# the shared Allowed / Daily Budget / Bonus Minutes / Max Bonus Minutes /
+# Parent Override / Total Minutes Today — so no helpers or template sensors
+# are needed. Depends only on kid names, not on this Mac, so every Mac
+# prints the same list: do it once per household, not once per Mac.
 HA_CHECKLIST="$(
-    CONFIG_PATH="$CONFIG_PATH" "$PYTHON_BIN" - <<'PY'
+    CONFIG_PATH="$CONFIG_PATH" BLUEPRINT_IMPORT_TEXT="$BLUEPRINT_IMPORT_TEXT" "$PYTHON_BIN" - <<'PY'
 import json, os
 with open(os.environ["CONFIG_PATH"]) as fh:
     data = json.load(fh)
@@ -774,46 +758,45 @@ for e in data.get("managed_users") or []:
 
 out = []
 out.append("Do this ONCE for the household (every Mac prints the same list).")
-out.append("Uses the COMBINED budget blueprint (right when kids use more than one Mac).")
+out.append("Every entity below is created automatically by the Macs. Each kid gets")
+out.append("a device named after them (Settings > Devices & Services > MQTT) that")
+out.append("holds that kid's shared entities; each Mac also gets its own device.")
 out.append("")
-for n, (child, prefix) in enumerate(kids, 1):
-    out.append(f"=== Kid {n}: {child} ===")
-    out.append("A. Template sensor: Settings > Devices & Services > Helpers >")
-    out.append("   Create Helper > Template > Template a sensor")
-    out.append(f"     Name:                {child} Total Minutes Today")
-    out.append("     Unit of measurement: min")
-    out.append("     State template (paste as-is):")
-    out.append("{{ states.sensor")
-    out.append(f"   | selectattr('attributes.friendly_name', 'search', ' {child} Mac Minutes$')")
-    out.append("   | map(attribute='state') | map('int', 0) | sum }}")
-    out.append("B. Budget number: Create Helper > Number")
-    out.append(f"     Name: {child} Daily Budget   Min 0  Max 600  Step 5  Unit min  Display mode: input field")
-    out.append(f"     Then set it to {child}'s real daily budget.")
-    out.append("C. Automation: Create Automation > Use blueprint >")
-    out.append("   Kid Mac Budget Enforcement (Combined Total)")
-    out.append(f"     Combined Minutes Sensor:  {child} Total Minutes Today   (from A)")
-    out.append(f"     Shared Daily Budget:      {child} Daily Budget          (from B)")
-    out.append(f"     Parent Override Switches: '{child} Mac Parent Override' from EVERY Mac")
-    out.append(f"     Allowed MQTT Topic:       {prefix}/allowed")
-    out.append(f"     Save, then rename the automation to '{child} Budget Enforcement'")
-    out.append("     (the blueprint's name field doesn't stick).")
+out.append("=== 1. Import the two blueprints ===")
+out.append("Settings > Automations & Scenes > Blueprints > Import Blueprint.")
+out.append("   " + os.environ["BLUEPRINT_IMPORT_TEXT"])
+out.append("")
+for n, (child, prefix) in enumerate(kids, 2):
+    out.append(f"=== {n}. {child} ===")
+    out.append(f"A. Open the '{child}' device and set Daily Budget to {child}'s real")
+    out.append("   daily minutes. (Max Bonus Minutes caps how much bonus counts; it's")
+    out.append("   treated as 60 until you set it.)")
+    out.append("B. Create Automation > Use blueprint > Kid Mac Budget Enforcement")
+    out.append(f"     Total Minutes Today: {child} Total Minutes Today")
+    out.append(f"     Daily Budget:        {child} Daily Budget")
+    out.append(f"     Bonus Minutes:       {child} Bonus Minutes")
+    out.append(f"     Max Bonus Minutes:   {child} Max Bonus Minutes")
+    out.append(f"     Parent Override:     {child} Parent Override")
+    out.append(f"     Allowed MQTT Topic:  {prefix}/allowed")
+    out.append(f"   Save, then rename the automation to '{child} Budget Enforcement'")
+    out.append("   (the blueprint's name field doesn't stick).")
     out.append("")
-out.append("=== Once, for all kids: daily reset ===")
+n = len(kids) + 2
+out.append(f"=== {n}. Once, for all kids: daily reset ===")
 out.append("Create Automation > Use blueprint > Kid Mac Daily Reset (all kids)")
-out.append("  Allowed Switches:          every '<kid> Mac Allowed', every kid, every Mac")
-out.append("  Parent Override Switches:  every '<kid> Mac Parent Override', every kid, every Mac")
-out.append("  Bonus Minutes Numbers:     every '<kid> Mac Bonus Minutes', every kid, every Mac")
+out.append("  Allowed Switches:          '<kid> Allowed' for every kid")
+out.append("  Parent Override Switches:  '<kid> Parent Override' for every kid")
+out.append("  Bonus Minutes Numbers:     '<kid> Bonus Minutes' for every kid")
 out.append("")
-out.append("=== Also, after the first install ===")
-out.append("- Flip each Parent Override switch on and off once, so its state is saved.")
+out.append(f"=== {n + 1}. After the first install ===")
+out.append("- Flip each kid's Parent Override on and off once, so its state is saved.")
 out.append("")
 out.append("Current limitations to know about:")
-out.append("- Bonus minutes are NOT counted by the budget automation; raise the")
-out.append("  Daily Budget helper instead of granting bonus.")
-out.append("- The Mac's own voice warnings (budget set, 15/10/5/1 minutes left) read")
-out.append("  that Mac's own '<kid> Mac Daily Budget (min)' number and count only that")
-out.append("  Mac's minutes, not the combined total. Set each Mac's number to the same")
-out.append("  value as the shared helper if you want warnings; leave it unset for none.")
+out.append("- If a Mac goes offline, its last reported minutes stay counted in the")
+out.append("  kid's Total Minutes Today until it reconnects (errs toward less time).")
+out.append("- A Mac that loses its connection doesn't yet enforce the budget by")
+out.append("  itself: it keeps the last Allowed value it received until it")
+out.append("  reconnects (root_daemon_fail_mode only applies if it never received one).")
 print("\n".join(out))
 PY
 )"
@@ -823,7 +806,7 @@ chmod 0644 "$HA_CHECKLIST_PATH"
 
 echo ""
 echo "============================================================"
-echo "HOME ASSISTANT SETUP — exactly what to create by hand"
+echo "HOME ASSISTANT SETUP — everything you do by hand"
 echo "============================================================"
 printf '%s\n' "$HA_CHECKLIST"
 echo "------------------------------------------------------------"
@@ -839,16 +822,15 @@ LaunchDaemon              : $DAEMON_PLIST_PATH
 LaunchAgent (voice helper): $HELPER_PLIST_PATH
 
 Next steps:
-  1. Confirm config values (managed_users, device_id, MQTT credentials,
-     fail mode) are correct in $CONFIG_PATH — full reference in
-     config/CONFIG_REFERENCE.md.
-  2. In Home Assistant, import the blueprints above: one budget
-     automation per kid (per-Mac or combined, see above), and one daily
-     reset automation total. Rename each automation after creating it.
+  1. Add this Mac's ACL block (printed above, saved at
+     $ACL_SNIPPET_PATH) to the broker's accesscontrollist, replacing
+     any older block for this Mac, then restart Mosquitto.
+  2. Follow the Home Assistant checklist above (once per household;
+     skip it on the second and later Macs if it's already done).
   3. Confirm the daemon is running (a PID means running):
        sudo launchctl list | grep com.ha.screen-daemon
        sudo tail -50 /var/log/root_daemon_skeleton.log
-  4. Toggle the 'allowed' switch in Home Assistant to confirm enforcement.
+  4. Toggle a kid's Allowed switch in Home Assistant to confirm enforcement.
   5. To remove everything cleanly later, run: sudo ./scripts/uninstall.sh
 ------------------------------------------------------------
 EOF

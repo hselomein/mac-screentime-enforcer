@@ -90,3 +90,5 @@ shutdown past a threshold.
 set via the `Max Bonus Minutes` number entity in HA (defaults to 60 in code
 until a parent sets one). Likewise `daily_budget`, `bonus_minutes`, and the
 `allowed` switch are all live MQTT-driven values, not config file settings.
+For the root daemon all of these are **per kid, shared by every Mac** that
+kid uses (one entity each on the kid's own HA device), not per machine.
