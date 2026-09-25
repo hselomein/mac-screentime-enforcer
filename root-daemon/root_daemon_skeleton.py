@@ -751,6 +751,13 @@ def _minutes_text(n: int) -> str:
 
 
 BUDGET_INITIAL_VOICE = "Your daily screen time limit has been set to {minutes}."
+# Spoken when a kid arrives at the console (login or fast user switch), not
+# on unlock. Delayed because at login the kid's voice helper starts in the
+# same moment and needs a few seconds to connect to MQTT — voice commands
+# aren't retained, so an announcement sent before then is silently lost
+# (seen for real: the login announcement never played).
+ARRIVAL_VOICE = "You have {remaining} of screen time left today."
+ARRIVAL_VOICE_DELAY_SECONDS = 10.0
 BUDGET_INCREASED_VOICE = (
     "Your parent has added {delta} to your daily limit. "
     "Your daily limit is now {minutes}."
@@ -878,7 +885,7 @@ def minutes_wildcard_topic(topic_prefix: str) -> str:
     return f"{topic_prefix}/mac/+/minutes_today"
 
 
-ROOT_DAEMON_VERSION = "0.2.0"
+ROOT_DAEMON_VERSION = "0.2.1"
 
 
 def _discovery_device(
@@ -1312,6 +1319,7 @@ def main() -> None:
     last_announced_base: dict = {}  # child -> float
     last_announced_bonus_applied: dict = {}  # child -> float (capped, not raw)
     budget_warned_thresholds: dict = {}  # child -> set[int]
+    arrival_voice_due: dict = {}  # child -> monotonic time the arrival announcement is due
 
     # Rapid-relogin protection state, all per-kid (dict keyed by child
     # name) — each kid accumulates their own independent streak, matching
@@ -1429,6 +1437,7 @@ def main() -> None:
                 last_seen_locked = locked
 
             if current_user != last_seen_user:
+                arrival_voice_due.clear()  # only whoever's arriving now gets one
                 if current_user is None:
                     logger.info("Console is at the login window (nobody logged in).")
                 else:
@@ -1440,6 +1449,9 @@ def main() -> None:
                             current_user,
                             child,
                             locked,
+                        )
+                        arrival_voice_due[child] = (
+                            time.monotonic() + ARRIVAL_VOICE_DELAY_SECONDS
                         )
                     else:
                         logger.info(
@@ -1727,8 +1739,32 @@ def main() -> None:
                     prev_base = last_announced_base.get(active_child)
                     prev_bonus_applied = last_announced_bonus_applied.get(active_child)
                     voice_prefix = registry.topic_prefix_for(active_child)
+                    remaining = current_effective - combined_minutes(active_child)
+                    arrival_due = arrival_voice_due.get(active_child)
 
-                    if prev_base is None and voice_prefix:
+                    if arrival_due is not None:
+                        # Just arrived: say nothing until the helper has had
+                        # time to connect, then one "time left" line, which
+                        # also covers any budget change made meanwhile.
+                        if time.monotonic() >= arrival_due:
+                            del arrival_voice_due[active_child]
+                            if voice_prefix and remaining >= 1:
+                                speak(
+                                    mqtt_client,
+                                    voice_prefix,
+                                    mqtt_config.device_id,
+                                    ARRIVAL_VOICE.format(
+                                        remaining=_minutes_text(int(remaining))
+                                    ),
+                                )
+                            last_announced_base[active_child] = current_base
+                            last_announced_bonus_applied[active_child] = current_bonus_applied
+                            # Don't follow up with a threshold warning the
+                            # arrival line already covered.
+                            budget_warned_thresholds[active_child] = {
+                                t for t in BUDGET_WARNING_THRESHOLDS if t >= remaining
+                            }
+                    elif prev_base is None and voice_prefix:
                         # First sight this run — one plain announcement
                         # using the full effective total, not just base;
                         # a kid doesn't need the base/bonus breakdown on
@@ -1779,11 +1815,10 @@ def main() -> None:
                         last_announced_bonus_applied[active_child] = current_bonus_applied
                         budget_warned_thresholds[active_child] = set()
 
-                    remaining = current_effective - combined_minutes(active_child)
                     warned = budget_warned_thresholds.setdefault(active_child, set())
                     if remaining > max(BUDGET_WARNING_THRESHOLDS):
                         warned.clear()
-                    elif voice_prefix:
+                    elif voice_prefix and active_child not in arrival_voice_due:
                         # Only the single most-specific (lowest) applicable
                         # threshold ever gets spoken — a big drop (e.g. the
                         # budget itself gets cut so remaining jumps straight
