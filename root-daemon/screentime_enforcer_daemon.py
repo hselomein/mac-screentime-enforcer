@@ -10,8 +10,11 @@ WHO is at the console from a single always-running process, tracks each
 managed kid's minutes (persisted per kid, reset at local midnight), publishes
 MQTT discovery + telemetry to Home Assistant, obeys each kid's retained
 `allowed` topic by locking the screen, escalates rapid re-logins to a
-shutdown, and sends voice warnings through the per-user user_voice_helper.py
-(root has no audio session of its own). Logs to /var/log/screentime-enforcer.log.
+shutdown, and sends voice warnings and lock requests through the per-user
+user_voice_helper.py (root has no GUI/audio session of its own; the helper
+does the real Lock Screen, display sleep is the fallback — see
+lock_session). Logs to /var/log/screentime-enforcer.log. Runs on Python 3.8+
+(macOS 11 Big Sur's CLT Python is 3.8; verified there and on macOS 26).
 
 Design goals carried over from the requirements doc (project plan, Section 13):
   - One process per machine (not one per managed user)

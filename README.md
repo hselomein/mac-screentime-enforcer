@@ -10,16 +10,19 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
 - **Local tracking**: minutes count only while the kid is the console user and the screen is unlocked; a backgrounded (fast-user-switched) or locked session pauses. The old agent also pauses after `idle_timeout_seconds` of no input; **the root daemon has no idle detection yet**, so a kid who walks away unlocked keeps accruing time.
 - **Enforcement**: when HA publishes `allowed=0`, the root daemon locks the screen: its per-user helper, running inside the kid's session, triggers the real Lock Screen (a password is always required), with display sleep (`pmset displaysleepnow`) as a fallback if the helper isn't running; the old agent locks or logs out. Both escalate repeated unlock attempts to a shutdown (rapid-relogin protection).
 - **MQTT discovery & telemetry**: entities appear in HA automatically. Root daemon: one device per kid (allowed, daily budget, bonus minutes, max bonus minutes, parent override, and total minutes today summed across every Mac) plus one per kid per Mac (minutes, active, online, session state). The old agent adds a JSON heartbeat and an optional active-app sensor, and has no session-state or bonus entities.
-- **Voice warnings** (root daemon, via a per-user helper): budget set/changed, bonus granted, 15/10/5/1 minutes left, and rapid-relogin warnings.
+- **Voice warnings** (root daemon, via a per-user helper): time left when a kid logs in or switches in, budget changed, bonus granted/reduced, 15/10/5/1 minutes left, and rapid-relogin warnings. Voice only plays while the kid is at the Mac and unlocked.
 - **Fail-safe when HA has never answered**: see `fail_mode` in [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md). Once the root daemon has received an `allowed` value it keeps enforcing that last value through a later MQTT outage.
 
 ## Requirements
 
-- macOS with a **parent admin** account and at least one **child non-admin** account (the root daemon can also manage a Mac's admin account itself, see below — useful if that account is a single family member's own Mac rather than a shared parent login).
+- macOS 11 Big Sur or later, Intel or Apple Silicon. The root daemon is verified on macOS 11.7 (Intel, Command Line Tools Python 3.8) and macOS 26 (Apple Silicon), same code on both.
+- A **parent admin** account and at least one **child non-admin** account (the root daemon can also manage a Mac's admin account itself, see below — useful if that account is a single family member's own Mac rather than a shared parent login).
 - Home Assistant with MQTT discovery enabled and an MQTT broker (e.g., Mosquitto).
 - MQTT credentials: one `mqtt_username`/`mqtt_password` per machine's `config.json`, for either tool — optionally restrict what topics that credential can actually touch via a broker-side ACL (see the ACL example further down). Internet to install Apple Command Line Tools once.
 
-## Install (parent admin account)
+## Install the old per-user agent
+
+Most people want the root daemon instead: see "Install the root daemon" below. These steps are for the old agent only.
 
 1. Install Command Line Tools: `xcode-select --install`
 2. Clone: `git clone https://github.com/hselomein/mac-screentime-enforcer.git && cd mac-screentime-enforcer`
@@ -33,9 +36,9 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
 ### macOS prompts & permissions
 
 - **Background item notice** on the child’s first login (expected for the LaunchAgent).
-- **Accessibility approval (admin required)** for `python3` at `/Library/Application Support/ha-screen-agent/agent.py` so it can lock/log out and, if enabled, read the frontmost app. Approve under **Settings → Privacy & Security → Accessibility**, then log out/in.
+- **Accessibility approval (admin required)** for `python3` at `/Library/Application Support/ha-screen-agent/agent.py` so it can lock/log out and, if enabled, read the frontmost app. Approve under **Settings → Privacy & Security → Accessibility**, then log out/in. (Old agent only: the root daemon needs no Accessibility permission.)
 
-## Install the root daemon (recommended for multiple kids on one Mac)
+## Install the root daemon (recommended)
 
 The old per-user agent above needs one LaunchAgent per macOS account, a
 reboot between account switches, and can't see who's actually at the
@@ -94,14 +97,16 @@ at the existing config, not starting over.
    `log show` won't show anything: the daemon logs to that file, not to
    macOS's unified log.
 3. To update after a `git pull`: rerun the installer (it offers to keep the
-   existing config), then `sudo launchctl kickstart -k system/com.ha.screen-daemon`.
+   existing config). It replaces the installed files and restarts the daemon
+   and every logged-in kid's helper itself. (To just restart the daemon:
+   `sudo launchctl kickstart -k system/com.ha.screen-daemon`.)
 4. To remove it later: `sudo ./scripts/uninstall.sh` (add `--all` to also
    remove the old agent, shared config, and venv — leaves nothing behind).
 
 **Known limitations (root daemon):** no idle detection (see above);
 minutes are counted as fixed 2-second ticks, which slightly undercounts;
 a clean `launchctl` stop skips shutdown cleanup (up to 30s of
-usage lost, "Agent Online" stays on); and `config.json`, which holds the
+usage lost, the per-Mac "Online" sensor stays on); and `config.json`, which holds the
 Mac's MQTT password, is group-readable by the first managed kid's primary
 group, which on a stock Mac is `staff` (every local account).
 
@@ -134,7 +139,7 @@ isn't covered by these blueprints.)
   - Mac → HA (retained): `screen/kiddo/mac/mac-mini/session_state`
   - HA → Mac (retained): `screen/kiddo/allowed` (`0/1`, `on/off`, `true/false`)
   - HA ↔ Mac (retained): `homeassistant/kiddo_shared/{daily_budget,bonus_minutes,max_bonus_minutes,override}/state`
-  - Mac → voice helper (not retained): `screen/kiddo/mac/mac-mini/voice_command`
+  - Mac → voice helper (not retained): `screen/kiddo/mac/mac-mini/voice_command` (text to speak) and `screen/kiddo/mac/mac-mini/lock_command` (lock this session)
 - **Daily reset of minutes**: at local midnight each Mac resets and
   republishes 0 for every kid it manages (persisted, so a restart doesn't
   lose the day). A sibling Mac's minutes only count toward today's total if
@@ -142,6 +147,8 @@ isn't covered by these blueprints.)
 - **Old entities are cleaned up automatically**: on connect the daemon
   clears the discovery configs of the earlier per-Mac
   `<child> Mac Allowed / Daily Budget / ...` scheme, so they disappear from HA.
+  This only covers the Mac's current `device_id`: if a Mac was reinstalled
+  with a new one, delete its old device in HA by hand.
 
 ### What you create by hand in Home Assistant
 
@@ -193,8 +200,8 @@ Configuration lives in `/Library/Application Support/ha-screen-agent/config.json
 
 | Field | Required | Notes |
 |-------|----------|-------|
-| `managed_users` | ✅ | List of mappings (one per macOS account to manage). Each entry: `mac_user_account`, `child_name` (letters/numbers/hyphen/underscore), optional `topic_prefix` (must start with `screen/<child_name>`), optional `device_id`. The agent only runs when the current macOS user matches an entry and uses that child name for topics/discovery. |
-| `device_id` | ➖ | Defaults to sanitized hostname if not set in the entry. |
+| `managed_users` | ✅ | List of mappings (one per macOS account to manage). Each entry: `mac_user_account`, `child_name` (letters/numbers/hyphen/underscore), optional `topic_prefix` (must start with `screen/<child_name>`; the root daemon logs a warning if it doesn't), optional `device_id`. The agent only runs when the current macOS user matches an entry and uses that child name for topics/discovery. |
+| `device_id` | ➖ | The installers suggest `<hostname>-<last 4 of the hardware serial>`, so two Macs with the same computer name can't collide. Keep it stable: a new one means a new set of entities in HA. |
 | `mqtt_host`, `mqtt_port`, `mqtt_username`, `mqtt_password`, `mqtt_tls` | ✅ | MQTT connectivity (TLS optional). |
 | `sample_interval_seconds` | ➖ | 5–60, default 15. |
 | `blocked_check_seconds` | ➖ | Polling interval (seconds) while blocked; 0.5–10, default 1.0 to re-lock quickly if the child reauthenticates. |
@@ -286,11 +293,11 @@ separate credentials per kid.
 | Root daemon not running | `sudo launchctl list \| grep com.ha.screen-daemon` (no PID = not running); `sudo tail -50 /var/log/screentime-enforcer.log`; crash output before logging starts goes to `/var/log/ha-screen-daemon.err.log`. |
 | No voice warnings | First check the Mac's own audio: run `say hello` in Terminal. No sound, and no volume icon in the menu bar or Touch Bar, means macOS audio itself is down (seen for real on a test Mac) — `sudo killall coreaudiod` (restarts by itself) or reboot. Voice only plays while the kid is at the Mac and unlocked. The helper runs per kid session: check `~/Library/Logs/ha-user-voice-helper/helper.log` in that kid's home (it logs every line it speaks). Budget/bonus warnings also need the daemon to be receiving the budget, so check the broker ACL allows `homeassistant/<child>_shared/+/state`. |
 | Blocked kid sees only a black screen, no password prompt | The kid's voice helper does the real lock from inside their session; if it isn't running, the daemon falls back to display sleep, which only locks when the account requires its password immediately after the display turns off. Check the helper log above, and set that option under System Settings → Lock Screen. |
-| Root daemon entities missing in HA | Kid's `managed_users` entry has no `topic_prefix` (skipped entirely), or the broker ACL denies `homeassistant/+/+/config` writes (discovery silently rejected — connection still looks fine). |
+| Root daemon entities missing in HA | Kid's `managed_users` entry has no `topic_prefix` (skipped entirely), or a `topic_prefix` that doesn't match `child_name` (the daemon logs a WARNING at startup — fix both together), or the broker ACL denies `homeassistant/+/+/config` writes (discovery silently rejected — connection still looks fine). |
 | Old agent does not start | `launchctl print gui/<uid> com.ha.screen-agent`; inspect `~/Library/Logs/ha-screen-agent/agent.err.log`. |
 | Minutes not updating in HA | Confirm MQTT topics via `mosquitto_sub` and broker ACLs allow publishing. |
-| Mac never unlocks after MQTT outage | Verify `offline_grace_period_seconds`, network reachability, and retained `allowed=1`. |
-| Child can still use Mac when blocked | Ensure HA publishes retained `allowed=0`, LaunchAgent is running, and enforcement mode is set correctly. |
+| Mac never unlocks after MQTT outage | Root daemon: it keeps the last `allowed` it received, so check the retained `screen/<child>/allowed` value and `root_daemon_fail_mode`. Old agent: verify `offline_grace_period_seconds`, network reachability, and retained `allowed=1`. |
+| Child can still use Mac when blocked | Ensure HA publishes retained `allowed=0` (check the kid's budget automation, and that Parent Override is off). Root daemon: check it's running and its log shows "Locking". Old agent: LaunchAgent running and enforcement mode set correctly. |
 | Mac shuts down after repeated blocked relogins | This is expected when rapid relogin protection is enabled. Tune `rapid_relogin_*` settings if the window or threshold is too aggressive. |
 
 ### Harder lockouts (when logout prompts appear)
@@ -300,9 +307,9 @@ Mostly relevant to the **old agent**; the root daemon only ever locks, and handl
 macOS shows a cancelable confirmation dialog when users are logged out, so a determined child can dodge `enforcement_mode=logout`. To make the block harder to bypass:
 
 - Prefer `enforcement_mode=lock` (default). The agent immediately locks the session instead of attempting logout.
-- Require a password to unlock after sleep/screensaver: **System Settings → Privacy & Security → Require password after sleep or screen saver begins** → set to *Immediately*.
+- Require a password to unlock after sleep/screensaver, set to *Immediately* (macOS 13+: **System Settings → Lock Screen**; older: **System Preferences → Security & Privacy → General**).
 - Give the child account its own password (even a simple PIN) so the lock screen cannot be dismissed without supervision.
-- Disable automatic login and fast user switching so the lock screen is always shown.
+- Disable automatic login. For the old agent only, also disable fast user switching so the lock screen is always shown (the root daemon handles it; keep it on).
 - Shorten `idle_timeout_seconds` and keep `sample_interval_seconds` small (e.g., 5–10 seconds) to reduce any window where they can act before the lock triggers.
 
 These steps keep the session locked instead of relying on logout, eliminating the cancelable prompt.

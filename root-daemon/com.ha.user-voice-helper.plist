@@ -18,7 +18,10 @@
     session by any mechanism tried — see Context/HANDOFF.md, "Voice
     warnings: UNRESOLVED", before assuming this plist is unnecessary.
     This helper runs natively inside the target session instead, so
-    `say` just works normally.
+    `say` just works normally. It also does the daemon's screen lock
+    (SACLockScreenImmediate, the menu's Lock Screen) for the same reason:
+    from inside the session it's a real password lock with no
+    Accessibility permission needed.
     -->
     <key>Label</key>
     <string>com.ha.user-voice-helper</string>

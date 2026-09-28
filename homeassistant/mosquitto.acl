@@ -76,9 +76,9 @@ user screentime_macbookprom1
 # --- cj on this machine ---
 # Telemetry + commands scoped to this kid on this specific device:
 # minutes_today, active, status, availability, voice_command,
-# session_state all live under here (daemon publishes all of these; the
-# voice helper — same credential, per-machine model — subscribes to
-# voice_command specifically, hence readwrite rather than write-only).
+# lock_command, session_state all live under here (daemon publishes all of
+# these; the voice helper — same credential, per-machine model — subscribes
+# to voice_command and lock_command, hence readwrite rather than write-only).
 topic readwrite screen/cj/mac/macbookprom1/#
 # The parent's allow/deny command (daemon subscribes, never publishes here).
 topic read screen/cj/allowed
