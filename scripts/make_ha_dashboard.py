@@ -47,7 +47,7 @@ STATUS_TEMPLATE = r"""{%- macro hm(m) -%}
 {% for s in states.sensor | selectattr('entity_id', 'search', '^sensor\\.KID_mac_.+_session_state$') | sort(attribute='entity_id') %}
 {%- set dev = s.name | regex_findall('\\(([^)]+)\\)') | first | default(s.name) -%}
 {%- set label = {'active': '🟢 in use', 'locked': '🔒 locked', 'backgrounded': '⚪ switched away', 'offline': '⚫ not logged in', 'unavailable': '⚫ Mac offline', 'unknown': '⚫ Mac offline'}.get(s.state, '❔ ' ~ s.state) %}
-{{ dev }}: {{ label }}<br>
+{{ dev }}: {{ label }}
 {%- endfor %}
 """
 
