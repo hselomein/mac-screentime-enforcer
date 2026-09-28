@@ -75,7 +75,7 @@ PYTHON_BIN="/usr/bin/python3"
 # daemon/helper — one config.json, one venv, one place to look.
 AGENT_DIR="/Library/Application Support/ha-screen-agent"
 CONFIG_PATH="$AGENT_DIR/config.json"
-DAEMON_PATH="$AGENT_DIR/root_daemon.py"
+DAEMON_PATH="$AGENT_DIR/screentime_enforcer_daemon.py"
 HELPER_PATH="$AGENT_DIR/user_voice_helper.py"
 VENV_PATH="$AGENT_DIR/venv"
 
@@ -464,7 +464,10 @@ PY
     fi
 fi
 
-install -o root -g wheel -m 0755 "$PROJECT_DIR/root-daemon/root_daemon_skeleton.py" "$DAEMON_PATH"
+install -o root -g wheel -m 0755 "$PROJECT_DIR/root-daemon/screentime_enforcer_daemon.py" "$DAEMON_PATH"
+# Renamed 2026-09-28 from root_daemon.py / root_daemon_skeleton.log; the
+# plist regenerated below points at the new name, so drop the old copies.
+rm -f "$AGENT_DIR/root_daemon.py" /var/log/root_daemon_skeleton.log
 install -o root -g wheel -m 0755 "$PROJECT_DIR/root-daemon/user_voice_helper.py" "$HELPER_PATH"
 
 if [[ ! -d "$VENV_PATH" ]]; then
@@ -835,7 +838,7 @@ Next steps:
      skip it on the second and later Macs if it's already done).
   3. Confirm the daemon is running (a PID means running):
        sudo launchctl list | grep com.ha.screen-daemon
-       sudo tail -50 /var/log/root_daemon_skeleton.log
+       sudo tail -50 /var/log/screentime-enforcer.log
   4. Toggle a kid's Allowed switch in Home Assistant to confirm enforcement.
   5. To remove everything cleanly later, run: sudo ./scripts/uninstall.sh
 ------------------------------------------------------------

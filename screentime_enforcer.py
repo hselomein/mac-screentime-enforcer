@@ -637,7 +637,7 @@ class ScreenTimeAgent:
         # hardware: two devices sharing the exact same display name for
         # the same kid makes HA's own entity_id collision disambiguation
         # produce unpredictable, inconsistent entity_ids per machine
-        # (not a simple _2/_3 suffix). See root_daemon_skeleton.py's
+        # (not a simple _2/_3 suffix). See screentime_enforcer_daemon.py's
         # _discovery_device for the full real-hardware evidence.
         name = f"{self.config.child_id} mac ({self.config.device_friendly_name or self.config.device_id})"
         return {

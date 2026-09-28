@@ -1,7 +1,7 @@
 # config.json field reference
 
 Both the old per-user agent (`screentime_enforcer.py`) and the new root
-daemon (`root_daemon_skeleton.py`) read the **same** `config.json` — that's
+daemon (`screentime_enforcer_daemon.py`) read the **same** `config.json` — that's
 deliberate, so a machine can be migrated by pointing the new daemon at the
 existing file rather than redesigning the schema. Some fields are read by
 both, some only by one. This table is the source of truth; when in doubt,

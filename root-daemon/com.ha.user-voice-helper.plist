@@ -13,7 +13,7 @@
     itself checks whether the current account is a managed kid and exits
     cleanly if not, so this is safe to load everywhere.
 
-    Exists specifically because root_daemon_skeleton.py (root, no GUI
+    Exists specifically because screentime_enforcer_daemon.py (root, no GUI
     session of its own) cannot reliably produce audio in another user's
     session by any mechanism tried — see Context/HANDOFF.md, "Voice
     warnings: UNRESOLVED", before assuming this plist is unnecessary.

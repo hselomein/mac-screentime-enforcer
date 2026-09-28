@@ -71,10 +71,10 @@ OLD_AGENT_PLIST_PATH="/Library/LaunchAgents/${OLD_AGENT_PLIST_LABEL}.plist"
 echo "This will remove:"
 echo "  - LaunchDaemon:  $DAEMON_PLIST_PATH"
 echo "  - LaunchAgent:   $HELPER_PLIST_PATH (all sessions)"
-echo "  - $AGENT_DIR/root_daemon.py"
+echo "  - $AGENT_DIR/screentime_enforcer_daemon.py (or root_daemon.py from older installs)"
 echo "  - $AGENT_DIR/user_voice_helper.py"
 echo "  - $AGENT_DIR/root-daemon-state/"
-echo "  - /var/log/ha-screen-daemon.*.log, /var/log/root_daemon_skeleton.log"
+echo "  - /var/log/ha-screen-daemon.*.log, /var/log/screentime-enforcer.log (or root_daemon_skeleton.log)"
 if [[ "$REMOVE_ALL" == true ]]; then
     echo ""
     echo "--all was passed, ALSO removing:"
@@ -143,13 +143,13 @@ echo "Stopping voice helper in all active sessions..."
 bootout_from_all_sessions "$HELPER_PLIST_PATH"
 rm -f "$HELPER_PLIST_PATH"
 
-rm -f "$AGENT_DIR/root_daemon.py"
+rm -f "$AGENT_DIR/screentime_enforcer_daemon.py" "$AGENT_DIR/root_daemon.py"
 rm -f "$AGENT_DIR/user_voice_helper.py"
 rm -rf "$AGENT_DIR/root-daemon-state"
 
 rm -f /var/log/ha-screen-daemon.out.log /var/log/ha-screen-daemon.err.log
 rm -f /var/log/ha-user-voice-helper.out.log /var/log/ha-user-voice-helper.err.log
-rm -f /var/log/root_daemon_skeleton.log
+rm -f /var/log/screentime-enforcer.log /var/log/root_daemon_skeleton.log
 
 echo "New daemon and voice helper removed."
 

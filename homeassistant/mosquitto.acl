@@ -13,7 +13,7 @@
 # This file was stale relative to the actual topic scheme for a while —
 # it only covered `screen/<child>/mac/#` and `screen/<child>/allowed`,
 # and never granted anything under `homeassistant/...` at all. In
-# reality both screentime_enforcer.py and root-daemon/root_daemon_skeleton.py
+# reality both screentime_enforcer.py and root-daemon/screentime_enforcer_daemon.py
 # also need to PUBLISH MQTT discovery configs there, and to READ the
 # daily_budget / bonus_minutes / max_bonus_minutes number state topics
 # (also under `homeassistant/`), which live in these same processes'

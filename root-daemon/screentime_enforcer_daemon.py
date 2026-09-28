@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 Root-level, multi-user-aware Screen Time daemon — the replacement for the
-per-user screentime_enforcer.py agent. (The filename still says "skeleton"
-from when it started as one; it's the full daemon now.)
+per-user screentime_enforcer.py agent. (Named root_daemon_skeleton.py until
+2026-09-28, from when it started as a skeleton; older notes use that name.)
 
 One root LaunchDaemon per Mac, installed by scripts/install_root_daemon.sh
-as /Library/Application Support/ha-screen-agent/root_daemon.py. It knows
+as /Library/Application Support/ha-screen-agent/screentime_enforcer_daemon.py. It knows
 WHO is at the console from a single always-running process, tracks each
 managed kid's minutes (persisted per kid, reset at local midnight), publishes
 MQTT discovery + telemetry to Home Assistant, obeys each kid's retained
 `allowed` topic by locking the screen, escalates rapid re-logins to a
 shutdown, and sends voice warnings through the per-user user_voice_helper.py
-(root has no audio session of its own). Logs to /var/log/root_daemon_skeleton.log.
+(root has no audio session of its own). Logs to /var/log/screentime-enforcer.log.
 
 Design goals carried over from the requirements doc (project plan, Section 13):
   - One process per machine (not one per managed user)
@@ -77,7 +77,7 @@ import paho.mqtt.client as mqtt  # type: ignore
 # test). /var/log survives reboots, and matches where the real installed
 # daemon's plist (com.ha.screen-daemon.plist) already expects its own
 # logs to live.
-LOG_FILE_PATH = "/var/log/root_daemon_skeleton.log"
+LOG_FILE_PATH = "/var/log/screentime-enforcer.log"
 
 _file_handler = logging.FileHandler(LOG_FILE_PATH)
 _file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))

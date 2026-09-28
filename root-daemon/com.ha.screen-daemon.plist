@@ -37,7 +37,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/Library/Application Support/ha-screen-agent/venv/bin/python3</string>
-        <string>/Library/Application Support/ha-screen-agent/root_daemon.py</string>
+        <string>/Library/Application Support/ha-screen-agent/screentime_enforcer_daemon.py</string>
     </array>
 
     <key>RunAtLoad</key>

@@ -1,7 +1,7 @@
 # Home Assistant notes for this project.
 #
 # There is deliberately no mqtt:/input_number:/input_boolean:/template:
-# YAML below. The root daemon (root-daemon/root_daemon_skeleton.py)
+# YAML below. The root daemon (root-daemon/screentime_enforcer_daemon.py)
 # publishes MQTT discovery for every entity it needs the moment it
 # connects, so nothing has to be defined by hand. Two kinds of device
 # appear under Settings -> Devices & Services -> MQTT:

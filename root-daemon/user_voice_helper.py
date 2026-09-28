@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Per-user LaunchAgent companion to root_daemon_skeleton.py: plays voice
+Per-user LaunchAgent companion to screentime_enforcer_daemon.py: plays voice
 warnings natively inside each managed kid's own session.
 
-WHY THIS EXISTS: root_daemon_skeleton.py runs as root, with no GUI
+WHY THIS EXISTS: screentime_enforcer_daemon.py runs as root, with no GUI
 session of its own. Extensive real-hardware testing (see
 Context/HANDOFF.md in the umbrella repo, "Voice warnings: UNRESOLVED")
 confirmed that no mechanism tried from that context — `launchctl asuser`,
@@ -69,7 +69,7 @@ def _setup_logging() -> None:
 
 
 def _sanitize_device_id(value: str) -> str:
-    """Matches screentime_enforcer.py's / root_daemon_skeleton.py's
+    """Matches screentime_enforcer.py's / screentime_enforcer_daemon.py's
     _sanitize_device_id exactly — same file, same transform, needed so
     this helper subscribes to the exact topic the root daemon publishes
     to."""
@@ -79,7 +79,7 @@ def _sanitize_device_id(value: str) -> str:
 
 def speak_locally(text: str) -> None:
     """Runs natively inside this session — no subprocess user-switching
-    needed at all, unlike everything root_daemon_skeleton.py tried."""
+    needed at all, unlike everything screentime_enforcer_daemon.py tried."""
     try:
         subprocess.run(["/usr/bin/say", text], check=True)
     except (subprocess.CalledProcessError, OSError):

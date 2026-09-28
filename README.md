@@ -90,7 +90,7 @@ at the existing config, not starting over.
      Blueprint dialog only accepts a URL), derived from this checkout's
      git remote. See "What you create by hand" below.
 2. Confirm it's running: `sudo launchctl list | grep com.ha.screen-daemon`
-   (a PID means running), then `sudo tail -50 /var/log/root_daemon_skeleton.log`.
+   (a PID means running), then `sudo tail -50 /var/log/screentime-enforcer.log`.
    `log show` won't show anything: the daemon logs to that file, not to
    macOS's unified log.
 3. To update after a `git pull`: rerun the installer (it offers to keep the
@@ -265,7 +265,7 @@ separate credentials per kid.
 │   ├── configuration.yaml                   # Notes: what discovery creates (no YAML needed)
 │   └── mosquitto.acl                        # Annotated broker ACL example
 └── root-daemon/
-    ├── root_daemon_skeleton.py              # The daemon (installed as .../ha-screen-agent/root_daemon.py)
+    ├── screentime_enforcer_daemon.py        # The daemon (installed under .../ha-screen-agent/ with the same name)
     ├── user_voice_helper.py                 # Per-user voice helper
     └── *.plist                              # Reference copies; the installer generates the real ones
 ```
@@ -283,7 +283,7 @@ separate credentials per kid.
 
 | Symptom | Checks |
 |---------|--------|
-| Root daemon not running | `sudo launchctl list \| grep com.ha.screen-daemon` (no PID = not running); `sudo tail -50 /var/log/root_daemon_skeleton.log`; crash output before logging starts goes to `/var/log/ha-screen-daemon.err.log`. |
+| Root daemon not running | `sudo launchctl list \| grep com.ha.screen-daemon` (no PID = not running); `sudo tail -50 /var/log/screentime-enforcer.log`; crash output before logging starts goes to `/var/log/ha-screen-daemon.err.log`. |
 | No voice warnings | First check the Mac's own audio: run `say hello` in Terminal. No sound, and no volume icon in the menu bar or Touch Bar, means macOS audio itself is down (seen for real on a test Mac) — `sudo killall coreaudiod` (restarts by itself) or reboot. Voice only plays while the kid is at the Mac and unlocked. The helper runs per kid session: check `~/Library/Logs/ha-user-voice-helper/helper.log` in that kid's home (it logs every line it speaks). Budget/bonus warnings also need the daemon to be receiving the budget, so check the broker ACL allows `homeassistant/<child>_shared/+/state`. |
 | Blocked kid sees only a black screen, no password prompt | The kid's voice helper does the real lock from inside their session; if it isn't running, the daemon falls back to display sleep, which only locks when the account requires its password immediately after the display turns off. Check the helper log above, and set that option under System Settings → Lock Screen. |
 | Root daemon entities missing in HA | Kid's `managed_users` entry has no `topic_prefix` (skipped entirely), or the broker ACL denies `homeassistant/+/+/config` writes (discovery silently rejected — connection still looks fine). |
