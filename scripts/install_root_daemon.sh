@@ -821,6 +821,20 @@ printf '%s\n' "$HA_CHECKLIST"
 echo "------------------------------------------------------------"
 echo "Saved for later at: $HA_CHECKLIST_PATH"
 
+# Optional ready-made dashboard (one column per kid: big time-left number,
+# status, every Mac, controls). Not part of the checklist above: nothing
+# depends on it.
+HA_DASHBOARD_PATH="$AGENT_DIR/ha_dashboard.yaml"
+if "$PYTHON_BIN" "$PROJECT_DIR/scripts/make_ha_dashboard.py" "$CONFIG_PATH" > "$HA_DASHBOARD_PATH" 2>/dev/null; then
+    chmod 0644 "$HA_DASHBOARD_PATH"
+    echo ""
+    echo "Optional HA dashboard saved at: $HA_DASHBOARD_PATH"
+    echo "  Settings > Dashboards > Add dashboard (new from scratch), open it,"
+    echo "  then pencil > three-dot menu > Raw configuration editor, and paste it in."
+else
+    rm -f "$HA_DASHBOARD_PATH"
+fi
+
 cat <<EOF
 
 ------------------------------------------------------------

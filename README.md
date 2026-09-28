@@ -170,6 +170,18 @@ Once per household (not once per Mac):
 topics filled in**, and saves it to
 `/Library/Application Support/ha-screen-agent/ha_setup_checklist.txt`.
 
+**Optional dashboard.** The installer also saves a ready-made dashboard to
+`/Library/Application Support/ha-screen-agent/ha_dashboard.yaml`: one column
+per kid with a large "time left" number, used vs. limit (bonus included),
+Allowed/Blocked and Override status, every Mac's state (in use, locked,
+switched away, not logged in, offline) and tiles for Allowed, Parent
+Override, Daily Budget, Bonus and Max Bonus. Built-in cards only, no HACS.
+To use it: Settings → Dashboards → Add dashboard → New dashboard from
+scratch, open it, then pencil → ⋮ → Raw configuration editor, and paste.
+Regenerate any time with
+`python3 scripts/make_ha_dashboard.py | pbcopy` (copies it to the clipboard).
+Set `device_friendly_name` in each Mac's config for nicer Mac names.
+
 ### How the budget automation decides
 
 It blocks (`allowed=0`, retained) when
@@ -266,6 +278,7 @@ separate credentials per kid.
 ├── scripts/install_service.sh               # Old agent installer (run with sudo)
 ├── scripts/install_root_daemon.sh           # Root-daemon + voice-helper installer (run with sudo)
 ├── scripts/uninstall.sh                     # Removes root daemon (or --all: everything), no breadcrumbs
+├── scripts/make_ha_dashboard.py             # Prints a ready-made HA dashboard for the kids in config.json
 ├── requirements.txt                         # Python deps (PyObjC, MQTT, etc.) — shared venv, both tools
 ├── homeassistant/
 │   ├── blueprints/                          # Budget enforcement (one per kid) + daily reset
