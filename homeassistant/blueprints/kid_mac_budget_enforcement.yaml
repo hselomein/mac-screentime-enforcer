@@ -3,9 +3,12 @@ blueprint:
   description: >-
     Blocks one kid on every Mac once their screen time for today reaches
     their daily budget plus any bonus (capped at their max bonus), and
-    unblocks them when it's back under — for example after a parent raises
-    the budget or grants bonus. Does nothing while the kid's Parent Override
-    is on, and nothing until their Daily Budget has been set.
+    unblocks them when it's back under after a parent raises the budget,
+    grants bonus or turns Parent Override off. Minutes going up never
+    unblocks, so a manual block holds until one of those (or the daily
+    reset). Parent Override means unlimited: turning it on allows the kid
+    right away and the budget is ignored until it's turned off. Does
+    nothing until their Daily Budget has been set.
 
     Everything it needs is created automatically by the Macs. Each kid has
     a device named after them holding Total Minutes Today (summed across
@@ -44,8 +47,9 @@ blueprint:
     parent_override_switch:
       name: Parent Override
       description: >-
-        The kid's "Parent Override" switch. While on, this automation leaves
-        `allowed` alone so a parent can hold it wherever they set it.
+        The kid's "Parent Override" switch: unlimited time. Turning it on
+        allows the kid right away, and while it's on the budget never
+        blocks them.
       selector:
         entity:
           domain: switch
@@ -63,10 +67,16 @@ variables:
   budget_e: !input daily_budget_entity
   bonus_e: !input bonus_minutes_entity
   max_bonus_e: !input max_bonus_entity
+  override_e: !input parent_override_switch
 
 trigger:
+  # Minutes ticking up can only ever block, never unblock: otherwise a
+  # parent's manual "not allowed" gets flipped back on at the next minute
+  # (seen for real with cj). Unblocking happens when a parent changes the
+  # budget, bonus, max bonus or override, or at the daily reset.
   - platform: state
     entity_id: !input total_minutes_sensor
+    id: minutes
   - platform: state
     entity_id: !input daily_budget_entity
   - platform: state
@@ -75,20 +85,31 @@ trigger:
     entity_id: !input max_bonus_entity
   - platform: state
     entity_id: !input parent_override_switch
+    id: override
 
 condition:
-  - condition: not
-    conditions:
-      - condition: state
-        entity_id: !input parent_override_switch
-        state: "on"
-  # Without a real budget the math below would treat it as 0 and block the
-  # kid immediately — do nothing until a parent has set one.
+  # While Parent Override is on, minutes ticking up do nothing at all.
   - condition: template
-    value_template: "{{ states(budget_e) | is_number }}"
+    value_template: "{{ not (is_state(override_e, 'on') and trigger.id == 'minutes') }}"
+  # Without a real budget the math below would treat it as 0 and block the
+  # kid immediately — do nothing until a parent has set one (override
+  # still works without one).
+  - condition: template
+    value_template: "{{ is_state(override_e, 'on') or states(budget_e) | is_number }}"
 
 action:
   - choose:
+      # Parent Override = unlimited: allow, whatever the budget says.
+      - conditions:
+          - condition: template
+            value_template: "{{ is_state(override_e, 'on') }}"
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: !input allowed_topic
+              qos: 1
+              retain: true
+              payload: "1"
       # Same effective-budget formula the Macs use for their voice
       # announcements: base + min(bonus, max bonus). >= so reaching the
       # budget exactly blocks. Max bonus defaults to 60 like the daemon.
@@ -105,13 +126,16 @@ action:
               qos: 1
               retain: true
               payload: "0"
-    default:
-      - service: mqtt.publish
-        data:
-          topic: !input allowed_topic
-          qos: 1
-          retain: true
-          payload: "1"
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id != 'minutes' }}"
+        sequence:
+          - service: mqtt.publish
+            data:
+              topic: !input allowed_topic
+              qos: 1
+              retain: true
+              payload: "1"
 
 mode: single
 max_exceeded: silent

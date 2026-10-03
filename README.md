@@ -126,7 +126,7 @@ isn't covered by these blueprints.)
   - `number.<child>_daily_budget` — minutes per day (0–600)
   - `number.<child>_bonus_minutes` — extra minutes for today (0–240)
   - `number.<child>_max_bonus_minutes` — caps how much bonus counts (0–240; treated as 60 until set)
-  - `switch.<child>_parent_override` — while on, the budget automation leaves `allowed` alone
+  - `switch.<child>_parent_override` — unlimited time: turning it on sets `allowed` on, and the budget never blocks while it stays on
   - `sensor.<child>_total_minutes_today` — the kid's minutes summed across every Mac, computed by the Macs
 - **Per-Mac device**, named `<child> mac (<friendly name or device_id>)`,
   for things that really are per machine: Minutes (this Mac only), Active,

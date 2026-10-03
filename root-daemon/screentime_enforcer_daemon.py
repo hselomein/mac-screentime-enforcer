@@ -1737,11 +1737,14 @@ def main() -> None:
             # Every kid, not just the active one, so a midnight reset reaches
             # HA (and the other Macs' totals) even for a kid who never touches
             # this Mac that day. After a reconnect everything is republished
-            # once, so values missed while disconnected are refreshed.
+            # once, so values missed while disconnected are refreshed —
+            # session_state too (on the next tick), or a "locked" sent
+            # during a drop leaves HA showing "in use" until it changes again.
             connected = mqtt_client.is_connected()
             if connected and not was_connected:
                 last_published_minutes.clear()
                 last_published_total.clear()
+                last_published_state.clear()
             was_connected = connected
             for child in registry.all_children():
                 prefix = registry.topic_prefix_for(child)

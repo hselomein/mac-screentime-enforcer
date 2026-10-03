@@ -25,10 +25,14 @@ DEFAULT_CONFIG = "/Library/Application Support/ha-screen-agent/config.json"
 # The kid's status card. KID is replaced with the child_name, NAME with a
 # display name. Same effective-limit math as the budget blueprint:
 # budget + min(bonus, max bonus), max bonus treated as 60 until set.
+# The total sensor is found by pattern, not exact id: HA appends _2 when a
+# stale entity already holds the name (seen for real with aaron), so take
+# the most recently updated live match.
 STATUS_TEMPLATE = r"""{%- macro hm(m) -%}
 {%- if m >= 60 -%}{{ m // 60 }}h {{ '%02d' | format(m % 60) }}m{%- else -%}{{ m }}m{%- endif -%}
 {%- endmacro -%}
-{%- set used = states('sensor.KID_total_minutes_today') | int(0) -%}
+{%- set totals = states.sensor | selectattr('entity_id', 'search', '^sensor\\.KID_total_minutes_today(_\\d+)?$') | rejectattr('state', 'in', ['unavailable', 'unknown']) | sort(attribute='last_updated') | list -%}
+{%- set used = (totals | last).state | int(0) if totals else 0 -%}
 {%- set budget = states('number.KID_daily_budget') -%}
 {%- set bonus = states('number.KID_bonus_minutes') | int(0) -%}
 {%- set maxb = states('number.KID_max_bonus_minutes') | int(60) -%}
