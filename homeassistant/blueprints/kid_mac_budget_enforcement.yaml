@@ -16,7 +16,7 @@ blueprint:
     Override.
 
     Import once, then create one automation per kid and rename it after
-    saving (e.g. "screentime_cj Budget Enforcement").
+    saving (e.g. "kiddo Budget Enforcement").
   domain: automation
   source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
   input:
@@ -57,7 +57,7 @@ blueprint:
       name: Allowed MQTT Topic
       description: >-
         The kid's topic_prefix plus "/allowed", e.g.
-        screen/screentime_cj/allowed. The installer's setup checklist lists
+        screen/kiddo/allowed. The installer's setup checklist lists
         the exact value for each kid.
       selector:
         text: {}
@@ -72,7 +72,7 @@ variables:
 trigger:
   # Minutes ticking up can only ever block, never unblock: otherwise a
   # parent's manual "not allowed" gets flipped back on at the next minute
-  # (seen for real with cj). Unblocking happens when a parent changes the
+  # (seen for real). Unblocking happens when a parent changes the
   # budget, bonus, max bonus or override, or at the daily reset.
   - platform: state
     entity_id: !input total_minutes_sensor

@@ -119,7 +119,7 @@ through MQTT discovery, so there are no helpers, template sensors or
 the root daemon. The old agent keeps its original per-Mac entities and
 isn't covered by these blueprints.)
 
-- **Per-kid device**, named after the kid (e.g. `screentime_cj`). Every Mac
+- **Per-kid device**, named after the kid (e.g. `screentime_kiddo`). Every Mac
   managing that kid publishes it identically, so HA shows exactly one no
   matter how many Macs the kid uses. Entity ids are predictable:
   - `switch.<child>_allowed` — drives lock/unlock on every Mac

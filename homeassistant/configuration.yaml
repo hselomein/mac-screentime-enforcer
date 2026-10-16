@@ -6,7 +6,7 @@
 # connects, so nothing has to be defined by hand. Two kinds of device
 # appear under Settings -> Devices & Services -> MQTT:
 #
-# One device PER KID, named after the kid (e.g. "screentime_cj"). Every Mac
+# One device PER KID, named after the kid (e.g. "screentime_kiddo"). Every Mac
 # managing that kid publishes it identically, so HA shows exactly one:
 #   <child> Allowed               switch (parent-settable; drives lock/unlock)
 #   <child> Daily Budget          number (parent-settable, minutes)

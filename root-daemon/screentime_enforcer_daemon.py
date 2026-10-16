@@ -368,9 +368,9 @@ def _sanitize_device_id(value: str) -> str:
     file, same transform) — critical, not cosmetic: topics built from an
     unsanitized device_id land on entirely different MQTT topics than the
     ones HA's existing entities are actually subscribed to. Confirmed on
-    real hardware: config.json's raw device_id is "MacbookProM1" (mixed
-    case), but every existing retained topic on the broker uses the
-    lowercased "macbookprom1" — publishing without this sanitization step
+    real hardware: config.json's raw device_id was mixed case (e.g.
+    "MacMini"), but every existing retained topic on the broker used the
+    lowercased "macmini" — publishing without this sanitization step
     silently wrote to a parallel set of topics nothing was listening to.
     """
     sanitized = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in value.lower())
@@ -599,7 +599,7 @@ def resolve_allowed(
     covers the actual incident from the handoff: a kid with NO seeded
     allowed value fails closed instantly, with no window for an operator
     to notice before rapid-relogin shutdown escalation kicks in (this
-    happened for real, with aaron). "grace" is the fix: bounded temporary
+    happened for real). "grace" is the fix: bounded temporary
     allowance instead of instant-lock or infinite-allow.
 
     - An explicit received value always wins, full stop.
@@ -662,8 +662,8 @@ def lock_session(
     (root, no GUI session of its own) — via `launchctl asuser`, the
     standard mechanism for a privileged process to act inside a specific
     user's GUI session. Confirmed on real hardware (2026-09-14, against
-    cj's actual session): `pmset displaysleepnow` run this way genuinely
-    locks it — waking requires cj's password — given "require password
+    a real kid's session): `pmset displaysleepnow` run this way genuinely
+    locks it — waking requires the kid's password — given "require password
     after sleep" is already a documented hard requirement for every
     managed account, not new configuration this introduces.
 
@@ -956,8 +956,8 @@ def _discovery_device(
     you across every Mac that kid uses — HA's own entity_id collision
     disambiguation kicks in and produces genuinely unpredictable,
     inconsistent entity_ids (observed directly: one Mac got
-    "screentime_cj_mac_screentime_cj_mac_minutes", a second got
-    "screentime_cj_mac_macbookprom2_screentime_cj_mac_minutes" — not a
+    "screentime_kiddo_mac_screentime_kiddo_mac_minutes", a second got
+    "screentime_kiddo_mac_mac2_screentime_kiddo_mac_minutes" — not a
     simple _2/_3 suffix, not guessable from the naming scheme alone).
     Giving every device a unique display name from the start means HA
     never has to invoke that disambiguation at all, so entity_ids come

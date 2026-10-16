@@ -66,7 +66,7 @@ build_config_interactive() {
     fi
     read -r -p "Device ID [$SUGGESTED_DEVICE_ID]: " DEVICE_ID
     DEVICE_ID=${DEVICE_ID:-$SUGGESTED_DEVICE_ID}
-    read -r -p "Friendly name for Home Assistant (optional, e.g. \"cj's MacBook Pro\" — tells this Mac apart from others the same kid uses): " FRIENDLY_NAME
+    read -r -p "Friendly name for Home Assistant (optional, e.g. \"Kiddo's MacBook Pro\" — tells this Mac apart from others the same kid uses): " FRIENDLY_NAME
     read -r -p "MQTT host (hostname/IP): " MQTT_HOST
     MQTT_HOST=${MQTT_HOST:-mqtt.local}
     read -r -p "MQTT port [1883]: " MQTT_PORT

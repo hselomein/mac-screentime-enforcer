@@ -222,7 +222,7 @@ build_config_interactive() {
     echo "than one Mac would otherwise see multiple identically-named" >&2
     echo "devices in HA with no way to tell them apart. Give this Mac a" >&2
     echo "short label to show alongside it there instead (e.g. \"Living" >&2
-    echo "Room MacBook\", \"cj's MacBook Pro\") — optional, blank is fine." >&2
+    echo "Room MacBook\", \"Kiddo's MacBook Pro\") — optional, blank is fine." >&2
     read -r -p "Friendly name for Home Assistant [${EXISTING_FRIENDLY_NAME:-none}]: " FRIENDLY_NAME
     FRIENDLY_NAME=${FRIENDLY_NAME:-${EXISTING_FRIENDLY_NAME:-}}
 

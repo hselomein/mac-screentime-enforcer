@@ -26,7 +26,7 @@ DEFAULT_CONFIG = "/Library/Application Support/ha-screen-agent/config.json"
 # display name. Same effective-limit math as the budget blueprint:
 # budget + min(bonus, max bonus), max bonus treated as 60 until set.
 # The total sensor is found by pattern, not exact id: HA appends _2 when a
-# stale entity already holds the name (seen for real with aaron), so take
+# stale entity already holds the name (seen for real), so take
 # the most recently updated live match.
 STATUS_TEMPLATE = r"""{%- macro hm(m) -%}
 {%- if m >= 60 -%}{{ m // 60 }}h {{ '%02d' | format(m % 60) }}m{%- else -%}{{ m }}m{%- endif -%}
@@ -57,7 +57,7 @@ STATUS_TEMPLATE = r"""{%- macro hm(m) -%}
 
 
 def display_name(child: str) -> str:
-    """screentime_cj -> CJ, screentime_aaron -> Aaron, kiddo -> Kiddo."""
+    """screentime_jo -> JO, screentime_sam -> Sam, kiddo -> Kiddo."""
     short = child.rsplit("_", 1)[-1] or child
     return short.upper() if len(short) <= 2 else short.title()
 

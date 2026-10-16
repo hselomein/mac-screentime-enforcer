@@ -71,47 +71,33 @@
 # same broad config grant also lets the daemon clear the discovery configs
 # of the older per-Mac entity scheme (an empty retained publish).
 
-user screentime_macbookprom1
+user screentime_mac-mini
 
-# --- cj on this machine ---
+# --- kiddo on this machine ---
 # Telemetry + commands scoped to this kid on this specific device:
 # minutes_today, active, status, availability, voice_command,
 # lock_command, session_state all live under here (daemon publishes all of
 # these; the voice helper — same credential, per-machine model — subscribes
 # to voice_command and lock_command, hence readwrite rather than write-only).
-topic readwrite screen/cj/mac/macbookprom1/#
+topic readwrite screen/kiddo/mac/mac-mini/#
 # The parent's allow/deny command (daemon subscribes, never publishes here).
-topic read screen/cj/allowed
+topic read screen/kiddo/allowed
 # Cross-device: read every Mac's own minutes_today for this kid (wildcard
 # on device_id — this daemon doesn't need to know sibling device_ids in
 # advance), and publish the combined total this daemon computes from them.
-topic read screen/cj/mac/+/minutes_today
-topic write screen/cj/total_minutes_today
+topic read screen/kiddo/mac/+/minutes_today
+topic write screen/kiddo/total_minutes_today
 # daily_budget / bonus_minutes / max_bonus_minutes — read
 # only, see the note above on why write is deliberately not granted.
 # Shared across every Mac this kid uses, not scoped to this one device.
-topic read homeassistant/cj_shared/+/state
+topic read homeassistant/kiddo_shared/+/state
 
-# --- aaron on this machine ---
-topic readwrite screen/aaron/mac/macbookprom1/#
-topic read screen/aaron/allowed
-topic read screen/aaron/mac/+/minutes_today
-topic write screen/aaron/total_minutes_today
-topic read homeassistant/aaron_shared/+/state
-
-# --- alenna on this machine ---
-topic readwrite screen/alenna/mac/macbookprom1/#
-topic read screen/alenna/allowed
-topic read screen/alenna/mac/+/minutes_today
-topic write screen/alenna/total_minutes_today
-topic read homeassistant/alenna_shared/+/state
-
-# --- athena on this machine ---
-topic readwrite screen/athena/mac/macbookprom1/#
-topic read screen/athena/allowed
-topic read screen/athena/mac/+/minutes_today
-topic write screen/athena/total_minutes_today
-topic read homeassistant/athena_shared/+/state
+# --- kid2 on this machine ---
+topic readwrite screen/kid2/mac/mac-mini/#
+topic read screen/kid2/allowed
+topic read screen/kid2/mac/+/minutes_today
+topic write screen/kid2/total_minutes_today
+topic read homeassistant/kid2_shared/+/state
 
 # Discovery CONFIG topics (see the wildcard limitation note above) —
 # broad on purpose, home-broker trade-off. Covers both per-machine
@@ -127,7 +113,7 @@ topic write homeassistant/+/+/config
 # the root daemon). Only relevant if a machine is still running the old
 # agent instead of the root daemon for a given kid. -------------------
 #
-# topic readwrite homeassistant/cj_macbookprom1_mac/override/state
+# topic readwrite homeassistant/kiddo_mac-mini_mac/override/state
 
 # --- Legacy alternative: one MQTT user per CHILD (old agent only) ----
 # Still valid if you're running screentime_enforcer.py with a genuinely
