@@ -15,8 +15,12 @@ blueprint:
     every Mac), Daily Budget, Bonus Minutes, Max Bonus Minutes and Parent
     Override.
 
-    Import once, then create one automation per kid and rename it after
-    saving (e.g. "kiddo Budget Enforcement").
+    Import once, then create one automation per kid. The name you type
+    when saving doesn't stick, and every kid's automation is saved under
+    the same ID, so the NEXT kid's save overwrites this one. After saving
+    each kid's, before starting the next: open its settings (⋮ →
+    Settings), rename it (e.g. "kiddo Budget Enforcement"), click the ↻
+    next to Entity ID so the ID follows the new name, and click Update.
   domain: automation
   source_url: https://raw.githubusercontent.com/hselomein/mac-screentime-enforcer/main/homeassistant/blueprints/kid_mac_budget_enforcement.yaml
   input:

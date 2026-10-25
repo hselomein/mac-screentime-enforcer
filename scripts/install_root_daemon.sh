@@ -209,7 +209,7 @@ build_config_interactive() {
     fi
     echo "" >&2
     echo "Device ID identifies this Mac in MQTT topics — it must be" >&2
-    echo "unique across every Mac you manage, not just distinct-looking." >&2
+    echo "unique across every Mac and PC you manage, not just distinct-looking." >&2
     echo "The suggested default below is safe to just accept even if this" >&2
     echo "Mac's name isn't actually unique (see the comment in this" >&2
     echo "script if you're curious why); type your own only if you want" >&2
@@ -788,8 +788,9 @@ for n, (child, prefix) in enumerate(kids, 2):
     out.append(f"     Max Bonus Minutes:   {child} Max Bonus Minutes")
     out.append(f"     Parent Override:     {child} Parent Override")
     out.append(f"     Allowed MQTT Topic:  {prefix}/allowed")
-    out.append(f"   Save, then rename the automation to '{child} Budget Enforcement'")
-    out.append("   (the blueprint's name field doesn't stick).")
+    out.append("   Save, then BEFORE the next kid (or their save overwrites this one):")
+    out.append(f"   open its settings (⋮ → Settings), rename it to '{child} Budget Enforcement',")
+    out.append("   click ↻ next to Entity ID so the ID follows the name, and click Update.")
     out.append("")
 n = len(kids) + 2
 out.append(f"=== {n}. Once, for all kids: daily reset ===")
@@ -800,13 +801,16 @@ out.append("  Bonus Minutes Numbers:     '<kid> Bonus Minutes' for every kid")
 out.append("")
 out.append(f"=== {n + 1}. After the first install ===")
 out.append("- Flip each kid's Parent Override on and off once, so its state is saved.")
+out.append("- Optional: set each kid's Offline Mode and Offline Grace Minutes. They")
+out.append("  replace root_daemon_fail_mode / root_daemon_fail_grace_minutes for that")
+out.append("  kid on every Mac and PC; until set, config.json's values apply.")
 out.append("")
 out.append("Current limitations to know about:")
 out.append("- If a Mac goes offline, its last reported minutes stay counted in the")
 out.append("  kid's Total Minutes Today until it reconnects (errs toward less time).")
 out.append("- A Mac that loses its connection doesn't yet enforce the budget by")
 out.append("  itself: it keeps the last Allowed value it received until it")
-out.append("  reconnects (root_daemon_fail_mode only applies if it never received one).")
+out.append("  reconnects (Offline Mode only applies if it never received one).")
 print("\n".join(out))
 PY
 )"

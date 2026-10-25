@@ -1,18 +1,18 @@
-# macOS Screen Time Agent for Home Assistant
+# Screen Time Agent for Home Assistant (macOS and Windows)
 
-Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces the retained "allowed" flag from HA — no Apple Screen Time APIs or special entitlements. Two tools live here, covering the same job differently:
+Tracks a child's computer usage, reports it to Home Assistant over MQTT, and enforces the retained "allowed" flag from HA — no Apple Screen Time or Microsoft Family Safety APIs, no special entitlements. A kid gets one budget across every Mac and PC they use. This README covers the Mac tools; the Windows agent has its own. What lives here:
 
 - **The old per-user agent** (`screentime_enforcer.py`) — a LaunchAgent that runs entirely inside the child's own user session. Simple, but needs one installed per macOS account, a reboot between account switches, and can't see who's actually at the console if a backgrounded kid gets blocked.
-- **The root daemon** (`root-daemon/`, recommended) — a single root-owned LaunchDaemon per Mac that watches every managed account on that machine at once, plus a small per-user voice helper for audio (root has no session of its own to play sound in). No per-account install, no reboot between switches, and it stays correct through macOS Fast User Switching. See "Install the root daemon" below.
-- **Windows 10/11** (`windows/`, new, not yet tested on real hardware): the same design as a Windows service, sharing each kid's budget and combined total with the Macs. See [`windows/README.md`](windows/README.md).
+- **The root daemon** (`root-daemon/`, recommended) — a single root-owned LaunchDaemon per Mac that watches every managed account on that machine at once, plus a small per-user helper that speaks and locks the screen from inside the kid's session (root has no session of its own to do either). No per-account install, no reboot between switches, and it stays correct through macOS Fast User Switching. See "Install the root daemon" below.
+- **The Windows agent** (`windows/`, for Windows 10/11, new and not yet tested on real hardware): the root daemon's design as a Windows service, sharing each kid's entities, budget and combined total with the Macs. See [`windows/README.md`](windows/README.md).
 
 ## What you get
 
 - **Local tracking**: minutes count only while the kid is the console user and the screen is unlocked; a backgrounded (fast-user-switched) or locked session pauses. The old agent also pauses after `idle_timeout_seconds` of no input; **the root daemon has no idle detection yet**, so a kid who walks away unlocked keeps accruing time.
 - **Enforcement**: when HA publishes `allowed=0`, the root daemon locks the screen: its per-user helper, running inside the kid's session, triggers the real Lock Screen (a password is always required), with display sleep (`pmset displaysleepnow`) as a fallback if the helper isn't running; the old agent locks or logs out. Both escalate repeated unlock attempts to a shutdown (rapid-relogin protection).
-- **MQTT discovery & telemetry**: entities appear in HA automatically. Root daemon: one device per kid (allowed, daily budget, bonus minutes, max bonus minutes, parent override, and total minutes today summed across every Mac) plus one per kid per Mac (minutes, active, online, session state). The old agent adds a JSON heartbeat and an optional active-app sensor, and has no session-state or bonus entities.
+- **MQTT discovery & telemetry**: entities appear in HA automatically. Root daemon: one device per kid (allowed, daily budget, bonus minutes, max bonus minutes, offline mode, offline grace minutes, parent override, and total minutes today summed across every Mac and PC) plus one per kid per Mac (minutes, active, online, session state). The old agent adds a JSON heartbeat and an optional active-app sensor, and has no session-state or bonus entities.
 - **Voice warnings** (root daemon, via a per-user helper): time left when a kid logs in or switches in, budget changed, bonus granted/reduced, 15/10/5/1 minutes left, and rapid-relogin warnings. Voice only plays while the kid is at the Mac and unlocked.
-- **Fail-safe when HA has never answered**: see `fail_mode` in [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md). Once the root daemon has received an `allowed` value it keeps enforcing that last value through a later MQTT outage.
+- **Fail-safe when HA has never answered**: each kid's Offline Mode (Block / Allow / Allow for a while) in HA, with `fail_mode` in config.json as the default; see [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md). Once the root daemon has received an `allowed` value it keeps enforcing that last value through a later MQTT outage.
 
 ## Requirements
 
@@ -44,9 +44,9 @@ Most people want the root daemon instead: see "Install the root daemon" below. T
 The old per-user agent above needs one LaunchAgent per macOS account, a
 reboot between account switches, and can't see who's actually at the
 console when a backgrounded kid gets blocked. The root daemon replaces it
-with a single root-owned LaunchDaemon plus a small per-user voice helper
-(audio has to run inside the real session — see `root-daemon/`'s docs for
-why). One shared install directory, one shared `config.json`, same
+with a single root-owned LaunchDaemon plus a small per-user helper (speech
+and the real Lock Screen have to run inside the kid's session — see
+`root-daemon/`'s docs for why). One shared install directory, one shared `config.json`, same
 `managed_users` schema — migrating a machine is pointing the new installer
 at the existing config, not starting over.
 
@@ -113,38 +113,42 @@ group, which on a stock Mac is `staff` (every local account).
 
 ## Home Assistant integration
 
-Home Assistant makes every allow/block decision; the Macs just report
-minutes and obey `allowed`. The root daemon creates every entity it needs
+Home Assistant makes every allow/block decision; the Macs and PCs just
+report minutes and obey `allowed`. The root daemon (and the Windows agent,
+which publishes the same per-kid entities) creates every entity it needs
 through MQTT discovery, so there are no helpers, template sensors or
 `configuration.yaml` entries to write. (Everything in this section is for
 the root daemon. The old agent keeps its original per-Mac entities and
 isn't covered by these blueprints.)
 
-- **Per-kid device**, named after the kid (e.g. `screentime_kiddo`). Every Mac
+- **Per-kid device**, named after the kid (e.g. `screentime_kiddo`). Every Mac and PC
   managing that kid publishes it identically, so HA shows exactly one no
-  matter how many Macs the kid uses. Entity ids are predictable:
+  matter how many machines the kid uses. Entity ids are predictable:
   - `switch.<child>_allowed` — drives lock/unlock on every Mac
   - `number.<child>_daily_budget` — minutes per day (0–600)
   - `number.<child>_bonus_minutes` — extra minutes for today (0–240)
   - `number.<child>_max_bonus_minutes` — caps how much bonus counts (0–240; treated as 60 until set)
+  - `select.<child>_offline_mode` — what a machine does if it has never received `allowed` (e.g. rebooted while HA is unreachable): Block, Allow, or Allow for a while. Until set, config.json's `root_daemon_fail_mode` applies
+  - `number.<child>_offline_grace_minutes` — how long "Allow for a while" lasts (0–1440, 15-minute steps). Until set, `root_daemon_fail_grace_minutes` applies
   - `switch.<child>_parent_override` — unlimited time: turning it on sets `allowed` on, and the budget never blocks while it stays on
-  - `sensor.<child>_total_minutes_today` — the kid's minutes summed across every Mac, computed by the Macs
+  - `sensor.<child>_total_minutes_today` — the kid's minutes summed across every Mac and PC, computed by the machines themselves
 - **Per-Mac device**, named `<child> mac (<friendly name or device_id>)`,
   for things that really are per machine: Minutes (this Mac only), Active,
   Online, Session State (`active`/`locked`/`backgrounded`/`offline`).
+  Windows PCs get the same set under `<child> pc (<name>)`.
 - **MQTT topics (child_name=kiddo, topic_prefix=screen/kiddo, device_id=mac-mini)**
-  - Mac → HA (retained): `screen/kiddo/mac/mac-mini/minutes_today` — JSON `{"minutes": 42, "date": "2026-09-25"}`; every Mac managing kiddo also reads the others' to build the total
-  - Mac → HA (retained): `screen/kiddo/total_minutes_today` (integer minutes, all Macs)
+  - Mac → HA (retained): `screen/kiddo/mac/mac-mini/minutes_today` — JSON `{"minutes": 42, "date": "2026-09-25"}`; every Mac managing kiddo also reads the others' (and Windows PCs' `screen/kiddo/win/<device>/minutes_today`) to build the total
+  - Mac → HA (retained): `screen/kiddo/total_minutes_today` (integer minutes, all Macs and PCs)
   - Mac → HA: `screen/kiddo/mac/mac-mini/active` (`0/1`)
   - Mac → HA (retained): `screen/kiddo/mac/mac-mini/availability` (`online`/`offline`)
   - Mac → HA (retained): `screen/kiddo/mac/mac-mini/session_state`
   - HA → Mac (retained): `screen/kiddo/allowed` (`0/1`, `on/off`, `true/false`)
-  - HA ↔ Mac (retained): `homeassistant/kiddo_shared/{daily_budget,bonus_minutes,max_bonus_minutes,override}/state`
+  - HA ↔ Mac (retained): `homeassistant/kiddo_shared/{daily_budget,bonus_minutes,max_bonus_minutes,offline_mode,offline_grace_minutes,override}/state`
   - Mac → voice helper (not retained): `screen/kiddo/mac/mac-mini/voice_command` (text to speak) and `screen/kiddo/mac/mac-mini/lock_command` (lock this session)
 - **Daily reset of minutes**: at local midnight each Mac resets and
   republishes 0 for every kid it manages (persisted, so a restart doesn't
-  lose the day). A sibling Mac's minutes only count toward today's total if
-  they're dated today.
+  lose the day). Another machine's minutes only count toward today's total
+  if they're dated today.
 - **Old entities are cleaned up automatically**: on connect the daemon
   clears the discovery configs of the earlier per-Mac
   `<child> Mac Allowed / Daily Budget / ...` scheme, so they disappear from HA.
@@ -161,8 +165,13 @@ Once per household (not once per Mac):
 2. **Per kid**: set their Daily Budget, then create one automation from
    *Kid Mac Budget Enforcement*, picking that kid's Total Minutes Today,
    Daily Budget, Bonus Minutes, Max Bonus Minutes and Parent Override, and
-   the topic `<topic_prefix>/allowed`. Rename the automation after saving
-   (the blueprint's name field doesn't stick).
+   the topic `<topic_prefix>/allowed`. **Rename each one before creating
+   the next**: the name typed when saving doesn't stick, and every kid's
+   automation is saved as `automation.kid_mac_budget_enforcement`, so the
+   next kid's save overwrites the previous kid's. After saving, open the
+   automation's settings (⋮ → Settings), rename it (e.g. "kiddo Budget
+   Enforcement"), click the ↻ next to Entity ID so the ID follows the new
+   name, and click Update.
 3. **Once**: one automation from *Kid Mac Daily Reset (all kids)*, picking
    every kid's Allowed, Parent Override and Bonus Minutes.
 4. Flip each kid's Parent Override on and off once, so its state is saved.
@@ -180,14 +189,14 @@ topics filled in**, and saves it to
 **Optional dashboard.** The installer also saves a ready-made dashboard to
 `/Library/Application Support/ha-screen-agent/ha_dashboard.yaml`: one column
 per kid with a large "time left" number, used vs. limit (bonus included),
-Allowed/Blocked and Override status, every Mac's state (in use, locked,
-switched away, not logged in, offline) and tiles for Allowed, Parent
+Allowed/Blocked and Override status, every Mac's and PC's state (in use,
+locked, switched away, not logged in, offline) and tiles for Allowed, Parent
 Override, Daily Budget, Bonus and Max Bonus. Built-in cards only, no HACS.
 To use it: Settings → Dashboards → Add dashboard → New dashboard from
 scratch, open it, then pencil → ⋮ → Raw configuration editor, and paste.
 Regenerate any time with
 `python3 scripts/make_ha_dashboard.py | pbcopy` (copies it to the clipboard).
-Set `device_friendly_name` in each Mac's config for nicer Mac names.
+Set `device_friendly_name` in each machine's config for nicer names.
 
 ### How the budget automation decides
 
@@ -196,19 +205,22 @@ It blocks (`allowed=0`, retained) when
     Total Minutes Today >= Daily Budget + min(Bonus Minutes, Max Bonus Minutes)
 
 and allows (`allowed=1`) otherwise — the same formula the Mac uses for its
-voice warnings. It re-evaluates whenever any of the five entities changes,
-so raising the budget or granting bonus unlocks a kid who's already locked.
-It does nothing while Parent Override is on, or until Daily Budget has been
-set. Because it's driven by the combined total, using up the budget on one
-Mac blocks the kid on every Mac.
+voice warnings. Minutes going up can only block, never unblock, so a block
+you set by hand (turning Allowed off) sticks until you raise the budget,
+grant bonus, change Max Bonus, toggle Parent Override, or the daily reset
+runs; any of those re-evaluates and can unlock a kid who's already locked.
+Parent Override means unlimited time: turning it on allows the kid right
+away, and the budget is ignored until it's turned off. The automation does
+nothing until Daily Budget has been set. Because it's driven by the combined
+total, using up the budget on one machine blocks the kid on every Mac and PC.
 
 The daily reset automation (03:00 by default) turns every kid's Allowed on,
 Parent Override off and Bonus Minutes to 0. It leaves Daily Budget and Max
 Bonus Minutes alone; see the blueprint's description for why.
 
 **Current limitations:**
-- If a Mac goes offline, its last reported minutes keep counting in the
-  kid's total until it reconnects (errs toward less time, not more).
+- If a Mac or PC goes offline, its last reported minutes keep counting in
+  the kid's total until it reconnects (errs toward less time, not more).
 - A Mac that loses its connection doesn't yet enforce the budget itself: it
   keeps the last `allowed` value it received until it reconnects.
   The kid's Offline Mode (or `root_daemon_fail_mode` until that's set) only
@@ -287,13 +299,14 @@ separate credentials per kid.
 ├── scripts/uninstall.sh                     # Removes root daemon (or --all: everything), no breadcrumbs
 ├── scripts/make_ha_dashboard.py             # Prints a ready-made HA dashboard for the kids in config.json
 ├── requirements.txt                         # Python deps (PyObjC, MQTT, etc.) — shared venv, both tools
+├── windows/                                 # Windows 10/11 agent (C#), see windows/README.md
 ├── homeassistant/
 │   ├── blueprints/                          # Budget enforcement (one per kid) + daily reset
 │   ├── configuration.yaml                   # Notes: what discovery creates (no YAML needed)
 │   └── mosquitto.acl                        # Annotated broker ACL example
 └── root-daemon/
     ├── screentime_enforcer_daemon.py        # The daemon (installed under .../ha-screen-agent/ with the same name)
-    ├── user_voice_helper.py                 # Per-user voice helper
+    ├── user_voice_helper.py                 # Per-user helper: speaks and locks inside the kid's session
     └── *.plist                              # Reference copies; the installer generates the real ones
 ```
 
@@ -302,7 +315,7 @@ separate credentials per kid.
 - Install and own all files as `root:wheel`; child accounts stay non-admin.
 - Root daemon: a `/Library/LaunchDaemons` job running as root, plus a voice-helper LaunchAgent in `/Library/LaunchAgents` that loads into every GUI session and exits immediately for non-managed accounts. Old agent: a LaunchAgent bootstrapped into each managed kid's GUI session.
 - **The MQTT password in `config.json` is readable by the kids.** The file is `0640`, group-owned by the first managed kid's primary group so the per-user voice helper (and the old agent) can read it — on a stock Mac that's `staff`, i.e. every local account. A kid could use it to publish their own `minutes_today` as 0. A broker ACL limits what it can reach, so use one (see below), but it can't stop that.
-- **Fail-safe covers only "never heard from HA".** Old agent: `fail_mode` plus `offline_grace_period_seconds`. Root daemon: `root_daemon_fail_mode` (`safe`/`open`/`grace`) applies only until the first `allowed` value arrives; after that it keeps enforcing the last value through an outage.
+- **Fail-safe covers only "never heard from HA".** Old agent: `fail_mode` plus `offline_grace_period_seconds`. Root daemon: the kid's Offline Mode in HA (or `root_daemon_fail_mode` until set: `safe`/`open`/`grace`) applies only until the first `allowed` value arrives; after that it keeps enforcing the last value through an outage.
 - `managed_users` controls which macOS accounts are tracked; broker ACLs should still scope what each machine's credential can publish.
 - Rapid relogin protection is on by default: if a blocked child unlocks the session 4 times within 60 seconds, it warns on attempt 3 and shuts the Mac down on attempt 4.
 
@@ -316,7 +329,7 @@ separate credentials per kid.
 | Root daemon entities missing in HA | Kid's `managed_users` entry has no `topic_prefix` (skipped entirely), or a `topic_prefix` that doesn't match `child_name` (the daemon logs a WARNING at startup — fix both together), or the broker ACL denies `homeassistant/+/+/config` writes (discovery silently rejected — connection still looks fine). |
 | Old agent does not start | `launchctl print gui/<uid> com.ha.screen-agent`; inspect `~/Library/Logs/ha-screen-agent/agent.err.log`. |
 | Minutes not updating in HA | Confirm MQTT topics via `mosquitto_sub` and broker ACLs allow publishing. |
-| Mac never unlocks after MQTT outage | Root daemon: it keeps the last `allowed` it received, so check the retained `screen/<child>/allowed` value and `root_daemon_fail_mode`. Old agent: verify `offline_grace_period_seconds`, network reachability, and retained `allowed=1`. |
+| Mac never unlocks after MQTT outage | Root daemon: it keeps the last `allowed` it received, so check the retained `screen/<child>/allowed` value and the kid's Offline Mode (or `root_daemon_fail_mode` if that isn't set). Old agent: verify `offline_grace_period_seconds`, network reachability, and retained `allowed=1`. |
 | Child can still use Mac when blocked | Ensure HA publishes retained `allowed=0` (check the kid's budget automation, and that Parent Override is off). Root daemon: check it's running and its log shows "Locking". Old agent: LaunchAgent running and enforcement mode set correctly. |
 | Mac shuts down after repeated blocked relogins | This is expected when rapid relogin protection is enabled. Tune `rapid_relogin_*` settings if the window or threshold is too aggressive. |
 
