@@ -4,6 +4,7 @@ Tracks a child's Mac usage, reports it to Home Assistant over MQTT, and enforces
 
 - **The old per-user agent** (`screentime_enforcer.py`) — a LaunchAgent that runs entirely inside the child's own user session. Simple, but needs one installed per macOS account, a reboot between account switches, and can't see who's actually at the console if a backgrounded kid gets blocked.
 - **The root daemon** (`root-daemon/`, recommended) — a single root-owned LaunchDaemon per Mac that watches every managed account on that machine at once, plus a small per-user voice helper for audio (root has no session of its own to play sound in). No per-account install, no reboot between switches, and it stays correct through macOS Fast User Switching. See "Install the root daemon" below.
+- **Windows 10/11** (`windows/`, new, not yet tested on real hardware): the same design as a Windows service, sharing each kid's budget and combined total with the Macs. See [`windows/README.md`](windows/README.md).
 
 ## What you get
 
@@ -165,6 +166,12 @@ Once per household (not once per Mac):
 3. **Once**: one automation from *Kid Mac Daily Reset (all kids)*, picking
    every kid's Allowed, Parent Override and Bonus Minutes.
 4. Flip each kid's Parent Override on and off once, so its state is saved.
+5. Optional: set each kid's **Offline Mode** (Block / Allow / Allow for a
+   while) and **Offline Grace Minutes**. They replace `root_daemon_fail_mode`
+   and `root_daemon_fail_grace_minutes` for that kid on every Mac and PC;
+   until you set them, config.json's values apply. Each machine saves the
+   last values it received, so they still apply after a reboot while HA
+   can't be reached.
 
 **`install_root_daemon.sh` prints exactly this with your kids' names and
 topics filled in**, and saves it to
@@ -204,8 +211,8 @@ Bonus Minutes alone; see the blueprint's description for why.
   kid's total until it reconnects (errs toward less time, not more).
 - A Mac that loses its connection doesn't yet enforce the budget itself: it
   keeps the last `allowed` value it received until it reconnects.
-  `root_daemon_fail_mode` only applies if it never received one (see
-  `config/CONFIG_REFERENCE.md`).
+  The kid's Offline Mode (or `root_daemon_fail_mode` until that's set) only
+  applies if it never received one (see `config/CONFIG_REFERENCE.md`).
 
 ## Configuration
 Configuration lives in `/Library/Application Support/ha-screen-agent/config.json`. This table covers the old agent's own fields; for the root daemon's additional fields (`root_daemon_*`) and a plainer explanation of what `fail_mode` actually does, see [`config/CONFIG_REFERENCE.md`](config/CONFIG_REFERENCE.md).

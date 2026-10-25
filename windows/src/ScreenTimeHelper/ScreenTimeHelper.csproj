@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- .NET Framework 4.8 ships with every Windows 10/11, and includes
+         System.Speech. The service starts this once per spoken line, so it
+         should be a small exe that starts instantly, not a 70 MB
+         self-contained one. -->
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <!-- WinExe: no console window flashes up in the kid's session. -->
+    <OutputType>WinExe</OutputType>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ScreenTimeHelper</AssemblyName>
+    <RootNamespace>ScreenTimeHelper</RootNamespace>
+    <Version>0.1.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System.Speech" />
+  </ItemGroup>
+
+</Project>

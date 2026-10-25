@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/ScreenTimeService/ScreenTimeService.csproj" />
+  <Project Path="src/ScreenTimeHelper/ScreenTimeHelper.csproj" />
+</Solution>

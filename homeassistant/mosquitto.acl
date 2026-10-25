@@ -82,10 +82,12 @@ user screentime_mac-mini
 topic readwrite screen/kiddo/mac/mac-mini/#
 # The parent's allow/deny command (daemon subscribes, never publishes here).
 topic read screen/kiddo/allowed
-# Cross-device: read every Mac's own minutes_today for this kid (wildcard
-# on device_id — this daemon doesn't need to know sibling device_ids in
-# advance), and publish the combined total this daemon computes from them.
+# Cross-device: read every Mac's and Windows PC's own minutes_today for
+# this kid (wildcard on device_id — this daemon doesn't need to know sibling
+# device_ids in advance), and publish the combined total it computes from
+# them.
 topic read screen/kiddo/mac/+/minutes_today
+topic read screen/kiddo/win/+/minutes_today
 topic write screen/kiddo/total_minutes_today
 # daily_budget / bonus_minutes / max_bonus_minutes — read
 # only, see the note above on why write is deliberately not granted.
@@ -96,6 +98,7 @@ topic read homeassistant/kiddo_shared/+/state
 topic readwrite screen/kid2/mac/mac-mini/#
 topic read screen/kid2/allowed
 topic read screen/kid2/mac/+/minutes_today
+topic read screen/kid2/win/+/minutes_today
 topic write screen/kid2/total_minutes_today
 topic read homeassistant/kid2_shared/+/state
 

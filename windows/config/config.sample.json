@@ -1,0 +1,21 @@
+{
+  "managed_users": [
+    { "windows_user_account": "kiddo", "child_name": "kiddo", "topic_prefix": "screen/kiddo" }
+  ],
+  "device_id": "family-pc",
+  "device_friendly_name": "",
+  "mqtt_host": "mqtt.home.local",
+  "mqtt_port": 1883,
+  "mqtt_username": "",
+  "mqtt_password": "",
+  "mqtt_tls": false,
+
+  "root_daemon_fail_mode": "safe",
+  "root_daemon_fail_grace_minutes": 120,
+  "rapid_relogin_shutdown_enabled": true,
+  "rapid_relogin_window_seconds": 60,
+  "root_daemon_rapid_relogin_max_attempts": 4,
+  "root_daemon_rapid_relogin_warn_attempt": 3,
+  "rapid_relogin_warn_voice": true,
+  "root_daemon_dry_run": false
+}

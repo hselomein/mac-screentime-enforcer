@@ -669,6 +669,7 @@ for entry in data.get("managed_users") or []:
     lines.append(f"topic readwrite {prefix}/mac/{device_id}/#")
     lines.append(f"topic read {prefix}/allowed")
     lines.append(f"topic read {prefix}/mac/+/minutes_today")
+    lines.append(f"topic read {prefix}/win/+/minutes_today")
     lines.append(f"topic write {prefix}/total_minutes_today")
     lines.append(f"topic read homeassistant/{child}_shared/+/state")
     lines.append("")

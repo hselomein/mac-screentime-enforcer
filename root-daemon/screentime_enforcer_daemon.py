@@ -575,6 +575,81 @@ def max_bonus_minutes_topic(child: str) -> str:
 DEFAULT_MAX_BONUS_MINUTES = 60.0  # used only if the parent hasn't set one yet
 
 
+# Offline Mode / Offline Grace Minutes: fail_mode and
+# root_daemon_fail_grace_minutes, set per kid from HA instead of config.json.
+# config.json's values are only the default until a parent picks one.
+def offline_mode_topic(child: str) -> str:
+    return f"homeassistant/{shared_base_id(child)}/offline_mode/state"
+
+
+def offline_grace_minutes_topic(child: str) -> str:
+    return f"homeassistant/{shared_base_id(child)}/offline_grace_minutes/state"
+
+
+# The HA select's options (what a parent sees) -> fail_mode values. The raw
+# values are accepted too, in case one is published by hand.
+OFFLINE_MODE_OPTIONS = {"Block": "safe", "Allow": "open", "Allow for a while": "grace"}
+
+
+def _parse_offline_mode(payload: str) -> Optional[str]:
+    text = payload.strip()
+    if text in OFFLINE_MODE_OPTIONS:
+        return OFFLINE_MODE_OPTIONS[text]
+    return text.lower() if text.lower() in {"safe", "open", "grace"} else None
+
+
+def kid_settings_path(child: str) -> str:
+    return f"/Library/Application Support/ha-screen-agent/root-daemon-state/{child}.settings.json"
+
+
+class KidSettings:
+    """
+    The last Offline Mode / Offline Grace Minutes received from HA for one
+    kid, saved to disk. These settings matter most right after a reboot with
+    the broker unreachable, which is exactly when they can't be fetched, so
+    the saved copy is what applies then. None = never set in HA, use
+    config.json. Written from paho's thread, read from main(), like the
+    other state dicts.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.fail_mode: Optional[str] = None
+        self.fail_grace_minutes: Optional[float] = None
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            mode = data.get("fail_mode")
+            self.fail_mode = mode if mode in {"safe", "open", "grace"} else None
+            grace = data.get("fail_grace_minutes")
+            self.fail_grace_minutes = float(grace) if grace is not None else None
+        except FileNotFoundError:
+            pass
+        except (json.JSONDecodeError, ValueError, TypeError, OSError):
+            logger.warning("Failed to read %s, using config.json defaults.", self.path, exc_info=True)
+
+    def update(self, **values) -> bool:
+        """Sets the given fields; saves and returns True only if something changed."""
+        changed = False
+        for key, value in values.items():
+            if getattr(self, key) != value:
+                setattr(self, key, value)
+                changed = True
+        if changed:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = self.path.with_suffix(".tmp")
+                with tmp_path.open("w", encoding="utf-8") as handle:
+                    json.dump(
+                        {"fail_mode": self.fail_mode, "fail_grace_minutes": self.fail_grace_minutes},
+                        handle,
+                    )
+                tmp_path.replace(self.path)
+            except OSError:
+                logger.error("Unable to save %s.", self.path, exc_info=True)
+        return changed
+
+
 def _as_bool(payload: str) -> Optional[bool]:
     """Matches screentime_enforcer.py's _as_bool exactly."""
     normalized = payload.strip().lower()
@@ -925,19 +1000,24 @@ def override_state_topic(child: str) -> str:
 
 
 # The kid's minutes today summed across every Mac, computed by each Mac from
-# its siblings' retained minutes_today (see minutes_wildcard_topic) and
+# its siblings' retained minutes_today (see minutes_wildcard_topics) and
 # published per kid, so HA gets the combined total with no helpers.
 def total_minutes_topic(topic_prefix: str) -> str:
     return f"{topic_prefix}/total_minutes_today"
 
 
-# Subscribing here makes the broker deliver every Mac's retained
+# Subscribing here makes the broker deliver every machine's retained
 # minutes_today for this kid — that's how a Mac learns its siblings exist.
-def minutes_wildcard_topic(topic_prefix: str) -> str:
-    return f"{topic_prefix}/mac/+/minutes_today"
+# Windows PCs (windows/ in this repo) publish under /win/ instead of /mac/,
+# so both are read and added into the same total.
+SIBLING_PLATFORMS = ("mac", "win")
 
 
-ROOT_DAEMON_VERSION = "0.2.2"
+def minutes_wildcard_topics(topic_prefix: str) -> list[str]:
+    return [f"{topic_prefix}/{platform}/+/minutes_today" for platform in SIBLING_PLATFORMS]
+
+
+ROOT_DAEMON_VERSION = "0.2.4"
 
 
 def _discovery_device(
@@ -978,8 +1058,10 @@ def _discovery_device(
 def _shared_discovery_device(child: str) -> dict:
     """The per-KID device holding everything that's one-per-kid across the
     household (allowed, budget, bonus, max bonus, parent override, total
-    minutes). Every Mac managing this kid publishes it identically, so HA
-    shows exactly one — no Mac is "in charge" of it.
+    minutes). Every Mac and Windows PC managing this kid publishes it
+    identically, so HA shows exactly one — no machine is "in charge" of it.
+    No sw_version: the Mac and Windows versions differ, and the device would
+    flip between them depending on which machine published last.
 
     Entity names under it are short ("Daily Budget"): HA prefixes the device
     name itself (confirmed on real hardware — friendly_name came out as
@@ -990,8 +1072,7 @@ def _shared_discovery_device(child: str) -> dict:
         "identifiers": [shared_base_id(child)],
         "name": child,
         "manufacturer": "Screen Time Agent",
-        "model": "Kid (all Macs)",
-        "sw_version": ROOT_DAEMON_VERSION,
+        "model": "Kid (all devices)",
     }
 
 
@@ -1131,6 +1212,25 @@ def _publish_discovery(
             "icon": "mdi:timer-lock",
             "device": shared_device,
         }),
+        ("select", f"{sb}_offline_mode", {
+            "name": "Offline Mode",
+            "state_topic": offline_mode_topic(child),
+            "command_topic": offline_mode_topic(child),
+            "options": list(OFFLINE_MODE_OPTIONS),
+            "retain": True,
+            "icon": "mdi:cloud-off-outline",
+            "device": shared_device,
+        }),
+        ("number", f"{sb}_offline_grace_minutes", {
+            "name": "Offline Grace Minutes",
+            "state_topic": offline_grace_minutes_topic(child),
+            "command_topic": offline_grace_minutes_topic(child),
+            "max": 1440,
+            **minutes_number,
+            "step": 15,
+            "icon": "mdi:timer-cog-outline",
+            "device": shared_device,
+        }),
         ("switch", f"{sb}_parent_override", {
             "name": "Parent Override",
             "state_topic": override_state_topic(child),
@@ -1169,6 +1269,7 @@ def build_mqtt_client(
     bonus_state: dict,
     max_bonus_state: dict,
     sibling_minutes: dict,
+    kid_settings: dict,
 ) -> mqtt.Client:
     """
     ONE client for the whole machine (requirement #4), not one per kid —
@@ -1221,7 +1322,10 @@ def build_mqtt_client(
             client.subscribe(daily_budget_topic(child))
             client.subscribe(bonus_minutes_topic(child))
             client.subscribe(max_bonus_minutes_topic(child))
-            client.subscribe(minutes_wildcard_topic(prefix))
+            client.subscribe(offline_mode_topic(child))
+            client.subscribe(offline_grace_minutes_topic(child))
+            for wildcard in minutes_wildcard_topics(prefix):
+                client.subscribe(wildcard)
             client.publish(
                 availability_topic(prefix, mqtt_config.device_id),
                 payload="online",
@@ -1262,8 +1366,8 @@ def build_mqtt_client(
             "Max bonus",
         )
 
-    # prefix -> child, for recognising other Macs' minutes arriving via the
-    # minutes_wildcard_topic subscription.
+    # prefix -> child, for recognising other machines' minutes arriving via
+    # the minutes_wildcard_topics subscriptions.
     prefix_to_child = {
         prefix: child
         for child in registry.all_children()
@@ -1272,22 +1376,53 @@ def build_mqtt_client(
     }
 
     def handle_sibling_minutes(topic: str, raw: bytes) -> None:
-        # <prefix>/mac/<device_id>/minutes_today — the prefix itself may
-        # contain slashes, so split on the "/mac/" marker, not on "/".
+        # <prefix>/<mac|win>/<device_id>/minutes_today — the prefix itself
+        # may contain slashes, so peel the known levels off the end instead
+        # of splitting the whole topic on "/".
         suffix = "/minutes_today"
-        if not topic.endswith(suffix) or "/mac/" not in topic:
+        if not topic.endswith(suffix):
             return
-        prefix, _, rest = topic.rpartition("/mac/")
-        device = rest[: -len(suffix)]
+        rest, _, device = topic[: -len(suffix)].rpartition("/")
+        prefix, _, platform = rest.rpartition("/")
+        if platform not in SIBLING_PLATFORMS:
+            return
         child = prefix_to_child.get(prefix)
-        if child is None or not device or "/" in device:
+        if child is None or not device:
             return
         minutes, date = _parse_minutes_payload(raw)
         if minutes is None:
             return
         sibling_minutes.setdefault(child, {})[device] = (minutes, date)
 
+    offline_mode_topics = {offline_mode_topic(child): child for child in registry.all_children()}
+    offline_grace_topics = {
+        offline_grace_minutes_topic(child): child for child in registry.all_children()
+    }
+
+    def handle_kid_setting(topic: str, raw: bytes) -> None:
+        payload = raw.decode("utf-8", errors="ignore").strip()
+        if topic in offline_mode_topics:
+            child = offline_mode_topics[topic]
+            mode = _parse_offline_mode(payload)
+            if mode is None:
+                logger.warning("Received invalid offline mode '%s' on %s", payload, topic)
+                return
+            if kid_settings[child].update(fail_mode=mode):
+                logger.info("Offline mode for '%s' set to %s from HA.", child, mode)
+            return
+        child = offline_grace_topics[topic]
+        try:
+            minutes = max(0.0, float(payload))
+        except ValueError:
+            logger.warning("Received invalid offline grace minutes '%s' on %s", payload, topic)
+            return
+        if kid_settings[child].update(fail_grace_minutes=minutes):
+            logger.info("Offline grace for '%s' set to %s minutes from HA.", child, minutes)
+
     def on_message(client, userdata, message):
+        if message.topic in offline_mode_topics or message.topic in offline_grace_topics:
+            handle_kid_setting(message.topic, message.payload or b"")
+            return
         if message.topic.endswith("/minutes_today"):
             handle_sibling_minutes(message.topic, message.payload or b"")
             return
@@ -1355,6 +1490,17 @@ def main() -> None:
     bonus_state: dict = {}  # child -> float minutes, raw (uncapped) bonus granted today
     max_bonus_state: dict = {}  # child -> float minutes, standing cap on bonus (not reset nightly)
     grace_started_at: dict = {}  # per-kid, only used when fail_mode="grace"
+    # Offline Mode / Offline Grace Minutes from HA, per kid, persisted.
+    kid_settings: dict[str, KidSettings] = {
+        child: KidSettings(Path(kid_settings_path(child))) for child in registry.all_children()
+    }
+
+    def fail_mode_for(child: str) -> str:
+        return kid_settings[child].fail_mode or mqtt_config.fail_mode
+
+    def fail_grace_minutes_for(child: str) -> float:
+        grace = kid_settings[child].fail_grace_minutes
+        return mqtt_config.fail_grace_minutes if grace is None else grace
     # child -> {device_id -> (minutes, date)}: every Mac's reported minutes
     # for the kid (including this one's own echo), via the wildcard subscribe.
     sibling_minutes: dict = {}
@@ -1394,6 +1540,7 @@ def main() -> None:
         bonus_state,
         max_bonus_state,
         sibling_minutes,
+        kid_settings,
     )
     logger.info(
         "Connecting to MQTT %s:%s as device '%s'.",
@@ -1565,7 +1712,7 @@ def main() -> None:
                     # they unlock their own session, so this transition
                     # block wouldn't see it happen again).
                     if (
-                        mqtt_config.fail_mode == "grace"
+                        fail_mode_for(should_be_active) == "grace"
                         and allowed_state.get(should_be_active) is None
                     ):
                         # setdefault, not [...]: this runs before the
@@ -1575,7 +1722,7 @@ def main() -> None:
                         started = grace_started_at.setdefault(
                             should_be_active, time.monotonic()
                         )
-                        remaining = mqtt_config.fail_grace_minutes - (
+                        remaining = fail_grace_minutes_for(should_be_active) - (
                             (time.monotonic() - started) / 60.0
                         )
                         logger.warning(
@@ -1603,9 +1750,9 @@ def main() -> None:
                     is_allowed = resolve_allowed(
                         enforced_child,
                         allowed_state,
-                        mqtt_config.fail_mode,
+                        fail_mode_for(enforced_child),
                         grace_started_at,
-                        mqtt_config.fail_grace_minutes,
+                        fail_grace_minutes_for(enforced_child),
                     )
                     blocked = not is_allowed
                     # Tracked on EVERY tick this kid is enforced_child,
@@ -1711,14 +1858,14 @@ def main() -> None:
                                 "fail_mode=%s).",
                                 enforced_child,
                                 allowed_state.get(enforced_child),
-                                mqtt_config.fail_mode,
+                                fail_mode_for(enforced_child),
                             )
                         else:
                             logger.warning(
                                 "Locking '%s' now (allowed=%s, fail_mode=%s).",
                                 enforced_child,
                                 allowed_state.get(enforced_child),
-                                mqtt_config.fail_mode,
+                                fail_mode_for(enforced_child),
                             )
                             lock_session(
                                 uid,

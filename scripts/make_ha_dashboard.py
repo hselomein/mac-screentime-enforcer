@@ -48,9 +48,9 @@ STATUS_TEMPLATE = r"""{%- macro hm(m) -%}
 {%- endif %}
 
 ### {{ '✅ Allowed' if is_state('switch.KID_allowed', 'on') else '⛔ Blocked' }}{{ ' · 🛡️ Override' if is_state('switch.KID_parent_override', 'on') else '' }}
-{% for s in states.sensor | selectattr('entity_id', 'search', '^sensor\\.KID_mac_.+_session_state$') | sort(attribute='entity_id') %}
+{% for s in states.sensor | selectattr('entity_id', 'search', '^sensor\\.KID_(mac|pc)_.+_session_state$') | sort(attribute='entity_id') %}
 {%- set dev = s.name | regex_findall('\\(([^)]+)\\)') | first | default(s.name) -%}
-{%- set label = {'active': '🟢 in use', 'locked': '🔒 locked', 'backgrounded': '⚪ switched away', 'offline': '⚫ not logged in', 'unavailable': '⚫ Mac offline', 'unknown': '⚫ Mac offline'}.get(s.state, '❔ ' ~ s.state) %}
+{%- set label = {'active': '🟢 in use', 'locked': '🔒 locked', 'backgrounded': '⚪ switched away', 'offline': '⚫ not logged in', 'unavailable': '⚫ offline', 'unknown': '⚫ offline'}.get(s.state, '❔ ' ~ s.state) %}
 {{ dev }}: {{ label }}
 {%- endfor %}
 """
